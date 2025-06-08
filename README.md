@@ -102,11 +102,11 @@ The framework uses a flexible tagging system to categorize and organize tools. T
 
 ### Available Tools
 
-LLMFlow provides a comprehensive set of tools (116 in total) organized by category. Below is the complete list of available tools:
 
-<div align="center">
   <img src="https://github.com/user-attachments/assets/0aa88988-9b27-47e0-8d01-0b4075eb4dcd" width="450" alt="agent">
-</div>
+
+
+LLMFlow provides a comprehensive set of tools (116 in total) organized by category. Below is the complete list of available tools:
 
 <details>
 <summary>File System & IO Operations</summary>
