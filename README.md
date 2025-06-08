@@ -100,7 +100,7 @@ The framework uses a flexible tagging system to categorize and organize tools. T
 - **Development**: Code execution, debugging, version control
 - **Cloud**: AWS, Google Cloud, Azure integrations
 
-### Available Tools
+## Available Tools
 
 
   <img src="https://github.com/user-attachments/assets/0aa88988-9b27-47e0-8d01-0b4075eb4dcd" width="450" alt="agent">
@@ -314,7 +314,7 @@ Below is the complete list of available tools:
 
 </details>
 
-### Development Guidelines
+## Development Guidelines
 - Follow PEP 8 style guide
 - Add tests for new features
 - Update documentation
