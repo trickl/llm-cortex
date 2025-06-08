@@ -100,11 +100,17 @@ The framework uses a flexible tagging system to categorize and organize tools. T
 - **Development**: Code execution, debugging, version control
 - **Cloud**: AWS, Google Cloud, Azure integrations
 
+<div align="center">
+  <img src="https://github.com/user-attachments/assets/0aa88988-9b27-47e0-8d01-0b4075eb4dcd" width="450" alt="agent">
+</div>
+
 ### Available Tools
 
 LLMFlow provides a comprehensive set of tools (116 in total) organized by category. Below is the complete list of available tools:
 
-#### File System & IO Operations
+
+<details>
+<summary>File System & IO Operations</summary>
 
 | Tool Name | Description | Tags |
 |-----------|-------------|------|
@@ -116,7 +122,10 @@ LLMFlow provides a comprehensive set of tools (116 in total) organized by catego
 | convert_file_format | Convert between file formats (CSV, JSON, XML, YAML) | file_system, convert, file_io |
 | get_file_info | Get detailed file information | file_system, info, file_io |
 
-#### System Operations & Monitoring
+</details>
+
+<details>
+<summary>System Operations & Monitoring</summary>
 
 | Tool Name | Description | Tags |
 |-----------|-------------|------|
@@ -133,7 +142,10 @@ LLMFlow provides a comprehensive set of tools (116 in total) organized by catego
 | system_health_check | Run system health check | system, monitoring, health |
 | analyze_system_performance | Analyze system performance | system, monitoring, performance |
 
-#### Shell & Command Execution
+</details>
+
+<details>
+<summary>Shell & Command Execution</summary>
 
 | Tool Name | Description | Tags |
 |-----------|-------------|------|
@@ -151,7 +163,10 @@ LLMFlow provides a comprehensive set of tools (116 in total) organized by catego
 | quick_shell_command | Execute a simple shell command | shell, quick, command |
 | configure_shell_security | Configure shell security settings | shell, security, config |
 
-#### Web & Search
+</details>
+
+<details>
+<summary>Web & Search</summary>
 
 | Tool Name | Description | Tags |
 |-----------|-------------|------|
@@ -159,7 +174,10 @@ LLMFlow provides a comprehensive set of tools (116 in total) organized by catego
 | quick_search | Quick web search with simplified results | search, web, quick |
 | parse_selected_urls | Parse and extract content from URLs | web, parse, extract |
 
-#### Cloud Services
+</details>
+
+<details>
+<summary>Cloud Services</summary>
 
 | Tool Name | Description | Tags |
 |-----------|-------------|------|
@@ -185,7 +203,10 @@ LLMFlow provides a comprehensive set of tools (116 in total) organized by catego
 | test_google_cloud_connection | Test Google Cloud connection | test, connection, cloud, google |
 | create_google_cloud_agent | Create Google Cloud agent | agent, cloud, google |
 
-#### Messaging & Communication
+</details>
+
+<details>
+<summary>Messaging & Communication</summary>
 
 | Tool Name | Description | Tags |
 |-----------|-------------|------|
@@ -208,7 +229,10 @@ LLMFlow provides a comprehensive set of tools (116 in total) organized by catego
 | test_platform_connections | Test messaging platform connections | test, messaging, connections |
 | create_messenger_agent | Create messaging agent | agent, messaging, wrapper |
 
-#### Email
+</details>
+
+<details>
+<summary>Email</summary>
 
 | Tool Name | Description | Tags |
 |-----------|-------------|------|
@@ -227,7 +251,10 @@ LLMFlow provides a comprehensive set of tools (116 in total) organized by catego
 | get_email_stats | Get email statistics and account info | stats, info, email, analytics |
 | create_email_agent | Create an email agent for complex operations | agent, email, wrapper, advanced |
 
-#### Vector Embeddings & Search
+</details>
+
+<details>
+<summary>Vector Embeddings & Search</summary>
 
 | Tool Name | Description | Tags |
 |-----------|-------------|------|
@@ -243,7 +270,10 @@ LLMFlow provides a comprehensive set of tools (116 in total) organized by catego
 | get_embedding_stats | Get statistics about embeddings | stats, embeddings, info, analysis |
 | create_embeddings_agent | Create embeddings and vector search agent | agent, embeddings, wrapper, advanced |
 
-#### Media Processing
+</details>
+
+<details>
+<summary>Media Processing</summary>
 
 | Tool Name | Description | Tags |
 |-----------|-------------|------|
@@ -257,7 +287,10 @@ LLMFlow provides a comprehensive set of tools (116 in total) organized by catego
 | create_grid_preview | Create grid preview from video frames | video, grid, preview, media |
 | create_video_montage | Create video montage from clips | video, montage, preview, media |
 
-#### Research & Documents
+</details>
+
+<details>
+<summary>Research & Documents</summary>
 
 | Tool Name | Description | Tags |
 |-----------|-------------|------|
@@ -268,12 +301,17 @@ LLMFlow provides a comprehensive set of tools (116 in total) organized by catego
 | download_pdf_from_url | Download PDF from URL | document, pdf, download |
 | pdf_tool | Perform operations on PDF files | document, split, merge, text, pdf |
 
-#### Utilities
+</details>
+
+<details>
+<summary>Utilities</summary>
 
 | Tool Name | Description | Tags |
 |-----------|-------------|------|
 | get_current_datetime | Get current date and time | datetime, current, utility |
 | conclude_current_turn | Signal conclusion of current interaction | control, terminate, utility |
+
+</details>
 
 ### Development Guidelines
 - Follow PEP 8 style guide
