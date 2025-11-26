@@ -23,6 +23,7 @@ _TOOL_MODULES: Iterable[str] = (
 	"tool_datetime",
 	"tool_system_monitoring",
 	"tool_shell",
+	"tool_git",
 	"tool_cloud",
 	"tool_messenger",
 	"tool_calendar",

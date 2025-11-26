@@ -17,5 +17,7 @@ pypdf
 pdfplumber
 reportlab
 pytesseract
+GitPython>=3.1.0
+PyGithub>=2.1.1
 # Add other dependencies here as needed
 # e.g., requests, beautifulsoup4, etc. 
