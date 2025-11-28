@@ -80,6 +80,7 @@ def test_quality_issue_agent_closes_first_lint_issue_end_to_end(
     config_data = yaml.safe_load(_QUALITY_AGENT_CONFIG.read_text(encoding="utf-8"))
     agent_config = config_data["agent"]
     workflow = agent_config.get("workflow", {})
+    agent_goals = agent_config.get("goals")
     tag_settings = agent_config.get("tools", {}).get("tags", {})
     include_tags: List[str] = list(tag_settings.get("include", []))
     if "shell" not in include_tags:
@@ -96,6 +97,7 @@ def test_quality_issue_agent_closes_first_lint_issue_end_to_end(
     agent = Agent(
         llm_client=llm_client,
         system_prompt=agent_config["base_context"]["system_prompt"],
+        initial_goals=agent_goals,
         available_tool_tags=include_tags,
         match_all_tags=tag_settings.get("match_all", False),
         max_iterations=workflow.get("max_iterations"),

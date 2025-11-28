@@ -107,8 +107,8 @@ def _resolve_clone_destination(repo_url: str, destination: Optional[str]) -> Pat
     return Path(tempfile.mkdtemp(prefix="llmflow-git-"))
 
 
-def _failure(message: str) -> Dict[str, Any]:
-    return {"success": False, "error": message}
+def _failure(message: str, retryable: bool = False) -> Dict[str, Any]:
+    return {"success": False, "error": message, "retryable": retryable}
 
 
 def _require_git() -> None:
@@ -214,7 +214,7 @@ def git_create_branch(
 
 @register_tool(tags=_TOOL_TAGS)
 def git_suggest_branch_name(
-    repo_path: str,
+    repo_path: Optional[str] = None,
     issue_reference: Optional[str] = None,
     prefix: str = "fix/issue-",
     max_suffix_attempts: int = 50,
@@ -225,6 +225,12 @@ def git_suggest_branch_name(
     prefixes it (default ``fix/issue-``), and appends a numeric suffix when the
     name already exists in the repository.
     """
+
+    if not repo_path:
+        return _failure(
+            "Provide the 'repo_path' pointing to your cloned repository when calling git_suggest_branch_name.",
+            retryable=True,
+        )
 
     try:
         repo = _resolve_repo(repo_path)
@@ -248,18 +254,40 @@ def git_suggest_branch_name(
             "base_branch_name": base_name,
             "was_modified": candidate != base_name,
         }
+    except RuntimeError as exc:
+        message = (
+            f"{exc}. Ensure the repository is cloned via git_clone_repository and reuse its 'path' value as 'repo_path' when calling git_suggest_branch_name."
+        )
+        return _failure(message, retryable=True)
     except Exception as exc:
         return _failure(str(exc))
 
 
 @register_tool(tags=_TOOL_TAGS)
-def git_switch_branch(repo_path: str, branch_name: str) -> Dict[str, Any]:
-    """Check out the given branch."""
+def git_switch_branch(
+    repo_path: str,
+    branch_name: Optional[str] = None,
+    branch: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Check out the given branch.
+
+    Args:
+        repo_path: Local repository path to operate on.
+        branch_name: Target branch name (preferred parameter).
+        branch: Backwards-compatible alias used by earlier prompts.
+    """
+
+    target_branch = branch_name or branch
+    if not target_branch:
+        return _failure(
+            "Missing 'branch_name' (or 'branch') argument for git_switch_branch.",
+            retryable=True,
+        )
 
     try:
         repo = _resolve_repo(repo_path)
-        repo.git.checkout(branch_name)
-        return {"success": True, "branch": branch_name, "commit": repo.head.commit.hexsha}
+        repo.git.checkout(target_branch)
+        return {"success": True, "branch": target_branch, "commit": repo.head.commit.hexsha}
     except Exception as exc:
         return _failure(str(exc))
 

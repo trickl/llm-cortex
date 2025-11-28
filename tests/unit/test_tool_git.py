@@ -121,3 +121,48 @@ def test_git_suggest_branch_name_handles_collisions(tmp_path):
     assert second["success"] is True
     assert second["branch_name"].endswith("-1")
     assert second["was_modified"] is True
+
+
+def test_git_suggest_branch_name_requires_repo_path() -> None:
+    result = tool_git.git_suggest_branch_name(issue_reference="lint-1")
+
+    assert result["success"] is False
+    assert "repo_path" in result["error"].lower()
+    assert result["retryable"] is True
+
+
+def test_git_suggest_branch_name_missing_repo_is_retryable(tmp_path):
+    missing_repo = tmp_path / "does-not-exist"
+
+    result = tool_git.git_suggest_branch_name(
+        repo_path=str(missing_repo),
+        issue_reference="lint-2",
+    )
+
+    assert result["success"] is False
+    assert "git_clone_repository" in result["error"].lower()
+    assert result["retryable"] is True
+
+
+def test_git_switch_branch_accepts_branch_alias(tmp_path):
+    repo_dir = tmp_path / "repo"
+    repo_path = _init_git_repo(repo_dir)
+    repo = Repo(repo_path)
+    repo.create_head("feature", commit=repo.head.commit)
+
+    result = tool_git.git_switch_branch(repo_path=repo_path, branch="feature")
+
+    assert result["success"] is True
+    assert result["branch"] == "feature"
+    assert repo.active_branch.name == "feature"
+
+
+def test_git_switch_branch_requires_target(tmp_path):
+    repo_dir = tmp_path / "repo"
+    repo_path = _init_git_repo(repo_dir)
+
+    result = tool_git.git_switch_branch(repo_path=repo_path)
+
+    assert result["success"] is False
+    assert "branch" in result["error"].lower()
+    assert result["retryable"] is True

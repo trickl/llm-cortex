@@ -33,9 +33,41 @@ agent:
         • Clone the repository's default branch first (use the configured
           ``default_branch`` parameter and assume "main" when it is not
           provided). Do not request a feature branch during clone.
-        • Immediately after cloning, call ``git_suggest_branch_name`` with the
-          Qlty issue ID and then ``git_create_branch`` to create and switch to
-          your working branch from the default branch before making edits.
+        • Record the ``path`` returned by ``git_clone_repository`` as your
+          canonical ``repo_path`` (e.g., "Cloned into /work/agent/foo; storing
+          repo_path=/work/agent/foo"). Reference this exact value every time a
+          git tool is invoked; do not invent or omit it.
+        • Launch ``run_fetch_issue_subgoal`` to gather the single lint issue you
+          will work on (or report when no issue is available) before any git
+          activity begins.
+        • Call ``run_prepare_workspace_subgoal`` to clone (or reuse) the
+          repository, capture ``repo_path``, and create the working branch. Do
+          not invoke additional git tools until this sub-goal succeeds and
+          returns the definitive ``repo_path``.
+        • Treat sub-goals as flexibly sized helpers. Launch them for the large
+          fix flow (``run_understand_issue_subgoal`` ➜ ``run_patch_issue_subgoal``)
+          and also for bite-sized reasoning such as crafting a unique branch
+          name from an issue summary. When you invoke ``run_subgoal`` directly,
+          provide a focused ``context`` packet, list only the tool tags that the
+          helper truly needs, and summarise the output before acting on it.
+        • Keep reusing the stored ``repo_path`` for all subsequent git tools
+          (``git_switch_branch``, ``git_stage_paths``, etc.). If a git tool ever
+          reports that ``repo_path`` is missing, immediately re-issue the call
+          with the recorded path instead of moving on.
+        • Once the working branch is active, call ``run_understand_issue_subgoal``
+          with the Qlty issue ID, summary, repo_path, and file hints. This
+          sub-goal runs only read-focused tools; capture its diagnosis JSON and
+          restate the findings in your own words before proceeding.
+        • Immediately pass that diagnosis plus ``repo_path`` to
+          ``run_patch_issue_subgoal`` so it can plan and apply the fix with the
+          editing/test tools it needs. Ensure the patch sub-goal returns the
+          applied changes and test outcomes needed for your commit message.
+        • After patching and tests complete, call ``run_finalize_issue_subgoal``
+          so it can stage, commit, push, and (optionally) open the pull request
+          with a concise delivery report.
+        • Treat each sub-goal as a tool invocation: build a compact context
+          packet, respect their iteration budgets, and summarize both outputs
+          before continuing with staging/commit/push steps in the parent loop.
         • Prefer reusing existing working directories when repeating steps; only
           reclone when the workspace is corrupted beyond repair.
         • Do not begin cloning, branching, or editing until you have a specific
@@ -58,6 +90,34 @@ agent:
         • Keep explanations under 200 words unless otherwise requested.
         • Honour repository hygiene: stage only the intended files, ensure
           branches follow the provided prefix, and surface the final PR URL.
+  goals:
+    - description: "Identify the next lint issue to fix."
+      priority: 5
+      instructions:
+        - "Call run_fetch_issue_subgoal with the configured owner/project filters before any git work."
+        - "Record the returned issue packet (id, slug, summary, candidate files, lint rule)."
+        - "If no issue is returned, report that outcome and stop."
+    - description: "Prepare a clean workspace with an active feature branch."
+      priority: 4
+      instructions:
+        - "Invoke run_prepare_workspace_subgoal using the repository URL, default branch, and issue reference."
+        - "Persist the repo_path from the sub-goal response and reuse it for all git/file actions."
+        - "Create or reuse a branch prefixed with working_branch_prefix before continuing."
+    - description: "Understand the lint issue."
+      priority: 3
+      instructions:
+        - "Call run_understand_issue_subgoal with repo_path, issue metadata, candidate files, and lint rule."
+        - "Summarize the diagnosis JSON (files, lines, root cause) in your own words for the user."
+    - description: "Implement and verify the fix."
+      priority: 2
+      instructions:
+        - "Run run_patch_issue_subgoal with repo_path plus the diagnosis summary to plan/apply the fix."
+        - "Capture applied changes and test output so they can be referenced in commits/PRs."
+    - description: "Finalize delivery with commit, tests evidence, and PR summary."
+      priority: 1
+      instructions:
+        - "Call run_finalize_issue_subgoal to stage any remaining files, craft the commit, push, and (optionally) open a PR."
+        - "Report commit SHA, branch, and tests/pr status back to the user."
   environment:
     repo_root_env_var: PROJECT_REPO_ROOT
     default_repo_root: .
@@ -70,6 +130,7 @@ agent:
         - git
         - file_system
         - qlty_single_issue
+        - subgoal
       match_all: false
     explicit:
       - git_clone_repository
@@ -80,6 +141,12 @@ agent:
       - git_get_uncommitted_changes
       - git_push_branch
       - git_create_pull_request
+      - run_subgoal
+      - run_fetch_issue_subgoal
+      - run_prepare_workspace_subgoal
+      - run_understand_issue_subgoal
+      - run_patch_issue_subgoal
+      - run_finalize_issue_subgoal
       - list_files_in_tree
       - read_text_file
       - overwrite_text_file
