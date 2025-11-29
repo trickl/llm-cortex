@@ -9,6 +9,7 @@ from .base import BaseSyscallModule, ToolResult, register_modules
 from .files import FileSyscalls
 from .git import GitSyscalls
 from .qlty import QltySyscalls
+from .subgoal import SubgoalSyscalls
 from .utility import UtilitySyscalls
 
 
@@ -24,6 +25,7 @@ def register_default_syscalls(
     file_manager_module=None,
     file_editing_module=None,
     qlty_module=None,
+    subgoal_module=None,
 ) -> SyscallRegistry:
     """Register the standard syscall set on ``registry``."""
 
@@ -35,6 +37,7 @@ def register_default_syscalls(
         )),
         GitSyscalls(**_maybe_kwargs(git_module=git_module)),
         QltySyscalls(**_maybe_kwargs(qlty_module=qlty_module)),
+        SubgoalSyscalls(**_maybe_kwargs(subgoal_module=subgoal_module)),
     )
     return register_modules(registry, modules)
 
@@ -53,6 +56,7 @@ __all__ = [
     "FileSyscalls",
     "GitSyscalls",
     "QltySyscalls",
+    "SubgoalSyscalls",
     "register_default_syscalls",
     "build_default_syscall_registry",
 ]

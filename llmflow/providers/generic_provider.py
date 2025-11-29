@@ -111,9 +111,10 @@ class GenericProvider(LLMProviderInterface):
             payload["max_tokens"] = kwargs.get("max_tokens", payload.get("max_tokens", 2048))
             payload["top_p"] = kwargs.get("top_p", payload.get("top_p", 1.0))
 
+        tool_choice = kwargs.get("tool_choice")
         if tools:
             payload["tools"] = tools
-            payload.setdefault("tool_choice", "auto")
+            payload["tool_choice"] = tool_choice or payload.get("tool_choice", "auto")
 
         print(f"[GenericProvider] Sending request to: {self.endpoint}")
         print(f"[GenericProvider] Payload: {json.dumps(payload, indent=2)}")

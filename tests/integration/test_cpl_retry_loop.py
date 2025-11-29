@@ -15,7 +15,7 @@ class SequenceLLMClient:
         self._responses = list(responses)
         self.calls = 0
 
-    def generate(self, messages, tools=None):
+    def generate(self, messages, tools=None, **kwargs):
         if not self._responses:
             raise RuntimeError("No more responses queued for SequenceLLMClient")
         self.calls += 1

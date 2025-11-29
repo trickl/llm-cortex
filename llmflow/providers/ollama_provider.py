@@ -95,9 +95,13 @@ class OllamaProvider(LLMProviderInterface):
         if options:
             payload["options"] = options
 
+        tool_choice = kwargs.get("tool_choice")
         if tools:
             payload["tools"] = tools
-            payload.setdefault("tool_choice", "auto")
+            if tool_choice is not None:
+                payload["tool_choice"] = tool_choice
+            else:
+                payload.setdefault("tool_choice", "auto")
 
         timeout = kwargs.get("timeout", 60)
 

@@ -25,11 +25,27 @@ from llmflow.logging_utils import RunArtifactManager, RunLogContext
 from llmflow.planning import CPLPlanOrchestrator, CPLPlanRequest, CPLPlanner
 from llmflow.planning.plan_runner import CPLPlanRunner, DeferredBodyPlanner
 from llmflow.telemetry.mermaid_recorder import MermaidSequenceRecorder
+from llmflow.tools import get_module_for_tool_name, load_tool_module
 from llmflow.tools.tool_registry import get_tool_schema, get_tool_tags
 
 from .agent_instrumentation import AgentInstrumentationMixin
 from .goals import GoalManager
 from .memory import Memory
+
+
+_CPL_PLANNING_GUIDANCE = (
+    "When responding you must first synthesize a complete CPL (Cortex Planning Language) plan "
+    "that conforms to the `define_context_planning_language` tool specification. Do not execute "
+    "tools directly; emit only CPL program text for the runtime to execute."
+)
+_SYSTEM_PROMPT_TEMPLATE = (
+    "{{ base_prompt }}\n\n"
+    "{{ planning_guidance }}"
+)
+_SYSTEM_PROMPT_PREVIEW = (
+    "{{ base_prompt }}\n\n"
+    "{{ planning_guidance }}"
+)
 
 
 _SYS_CALL_TOOL_MAP: Dict[str, Optional[str]] = {
@@ -49,6 +65,12 @@ _SYS_CALL_TOOL_MAP: Dict[str, Optional[str]] = {
     "createPullRequest": "git_create_pull_request",
     "qltyListIssues": "qlty_list_issues",
     "qltyGetFirstIssue": "qlty_get_first_issue",
+    "runSubgoal": "run_subgoal",
+    "runFetchIssueSubgoal": "run_fetch_issue_subgoal",
+    "runPrepareWorkspaceSubgoal": "run_prepare_workspace_subgoal",
+    "runUnderstandIssueSubgoal": "run_understand_issue_subgoal",
+    "runPatchIssueSubgoal": "run_patch_issue_subgoal",
+    "runFinalizeIssueSubgoal": "run_finalize_issue_subgoal",
 }
 
 
@@ -78,8 +100,10 @@ class Agent(AgentInstrumentationMixin):
     ):
         self.llm_client = llm_client
         self.goal_manager = GoalManager(initial_goals=initial_goals)
-        self.memory = Memory(system_prompt=system_prompt)
-        self.system_prompt = system_prompt
+        self.system_prompt, self._system_prompt_template_preview = self._render_system_prompt(
+            system_prompt
+        )
+        self.memory = Memory(system_prompt=self.system_prompt)
         self.available_tool_tags = available_tool_tags
         self.match_all_tags_for_tools = match_all_tags
         self.verbose = verbose
@@ -121,7 +145,8 @@ class Agent(AgentInstrumentationMixin):
 
         if self.verbose:
             print("Agent initialized for CPL planning.")
-            print(f"System Prompt: {system_prompt}")
+            print("System Prompt Template (spec omitted in logs):")
+            print(self._system_prompt_template_preview)
             print(
                 f"Allowed syscalls ({len(self.allowed_syscalls)}): "
                 + ", ".join(self.allowed_syscalls)
@@ -247,6 +272,11 @@ class Agent(AgentInstrumentationMixin):
                 continue
             seen.add(tool_name)
             schema = get_tool_schema(tool_name)
+            if schema is None:
+                module_name = get_module_for_tool_name(tool_name)
+                if module_name:
+                    load_tool_module(module_name, warn=self.verbose)
+                    schema = get_tool_schema(tool_name)
             if schema:
                 schemas.append(schema)
         return schemas
@@ -349,4 +379,19 @@ class Agent(AgentInstrumentationMixin):
 
     def _pending_goal_count(self) -> int:
         return sum(1 for goal in self.goal_manager.goals if not goal.completed)
+
+    def _render_system_prompt(self, base_prompt: str) -> tuple[str, str]:
+        prompt = (base_prompt or "").strip()
+        if not prompt:
+            prompt = "You are a helpful AI assistant that coordinates CPL plans."
+        replacements = {
+            "{{ base_prompt }}": prompt,
+            "{{ planning_guidance }}": _CPL_PLANNING_GUIDANCE,
+        }
+        rendered = _SYSTEM_PROMPT_TEMPLATE
+        preview = _SYSTEM_PROMPT_PREVIEW
+        for placeholder, value in replacements.items():
+            rendered = rendered.replace(placeholder, value)
+            preview = preview.replace(placeholder, value)
+        return rendered.strip(), preview.strip()
 

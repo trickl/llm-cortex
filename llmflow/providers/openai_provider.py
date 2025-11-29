@@ -52,7 +52,7 @@ class OpenAIProvider(LLMProviderInterface):
         }
         if tools:
             request_params["tools"] = tools
-            request_params["tool_choice"] = "auto"
+            request_params["tool_choice"] = kwargs.get("tool_choice", "auto")
 
         try:
             chat_completion: ChatCompletion = self.client.chat.completions.create(
