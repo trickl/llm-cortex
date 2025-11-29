@@ -3,9 +3,8 @@ from __future__ import annotations
 
 from typing import Callable, Dict, List
 
-from dsl.syscall_registry import SyscallRegistry
-
-from llmflow.planning.plan_runner import CPLPlanRunner
+from llmflow.planning.plan_runner import PlanRunner
+from llmflow.runtime.syscall_registry import SyscallRegistry
 
 
 def _registry_factory(capture: List[str]) -> Callable[[], SyscallRegistry]:
@@ -24,13 +23,14 @@ def _registry_factory(capture: List[str]) -> Callable[[], SyscallRegistry]:
 
 def test_execute_runs_plan_and_merges_metadata():
     messages: List[str] = []
-    runner = CPLPlanRunner(
+    runner = PlanRunner(
         registry_factory=_registry_factory(messages),
-        dsl_specification="SPEC",
+        specification="SPEC",
     )
-    plan_source = """plan {
-        function main() : Void {
-            syscall.log(\"hello\");
+    plan_source = """
+    public class Plan {
+        public void main() {
+            syscall.log("hello");
             return;
         }
     }
@@ -56,17 +56,18 @@ def test_execute_invokes_deferred_planner_with_context():
         return '{ syscall.log("deferred"); return; }'
 
     messages: List[str] = []
-    runner = CPLPlanRunner(
+    runner = PlanRunner(
         registry_factory=_registry_factory(messages),
         deferred_planner=deferred_planner,
-        dsl_specification="SPEC",
+        specification="SPEC",
     )
 
-    plan_source = """plan {
+    plan_source = """
+    public class Plan {
         @Deferred
-        function deferredTask() : Void;
+        public void deferredTask();
 
-        function main() : Void {
+        public void main() {
             deferredTask();
             return;
         }

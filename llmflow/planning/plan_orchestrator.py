@@ -1,4 +1,4 @@
-"""High-level orchestration with retry/repair loops for CPL plans."""
+"""High-level orchestration with retry/repair loops for Java plans."""
 from __future__ import annotations
 
 import logging
@@ -7,17 +7,17 @@ from typing import Any, Callable, Dict, List, Optional, Sequence
 
 from llmflow.logging_utils import PLAN_LOGGER_NAME
 
-from .cpl_planner import CPLPlanRequest, CPLPlanResult, CPLPlanner
-from .plan_runner import CPLPlanRunner
+from .java_planner import JavaPlanRequest, JavaPlanResult, JavaPlanner
+from .plan_runner import PlanRunner
 
 
-class CPLPlanOrchestrator:
+class PlanOrchestrator:
     """Coordinate plan generation, execution, and targeted retries."""
 
     def __init__(
         self,
-        planner: CPLPlanner,
-        runner_factory: Callable[[], CPLPlanRunner],
+        planner: JavaPlanner,
+        runner_factory: Callable[[], PlanRunner],
         *,
         max_retries: int = 1,
         max_error_hints: int = 3,
@@ -34,7 +34,7 @@ class CPLPlanOrchestrator:
 
     def execute_with_retries(
         self,
-        request: CPLPlanRequest,
+        request: JavaPlanRequest,
         *,
         capture_trace: bool = False,
         metadata: Optional[Dict[str, Any]] = None,
@@ -99,7 +99,7 @@ class CPLPlanOrchestrator:
             "summary": self._format_summary(telemetry),
         }
 
-    def _log_plan_attempt(self, attempt_number: int, plan_result: CPLPlanResult) -> None:
+    def _log_plan_attempt(self, attempt_number: int, plan_result: JavaPlanResult) -> None:
         if not plan_result or not plan_result.plan_source:
             return
         self._plan_logger.info(
@@ -112,10 +112,10 @@ class CPLPlanOrchestrator:
 
     def _augment_request(
         self,
-        original: CPLPlanRequest,
+        original: JavaPlanRequest,
         attempt_idx: int,
         repair_hints: Sequence[str],
-    ) -> CPLPlanRequest:
+    ) -> JavaPlanRequest:
         if attempt_idx == 0 and not repair_hints:
             return original
 
@@ -229,7 +229,7 @@ class CPLPlanOrchestrator:
         attempt_count = telemetry.get("attempt_count", 0)
         success = telemetry.get("success", False)
         status_symbol = "✅" if success else "❌"
-        lines = [f"{status_symbol} CPL plan run – {attempt_count} attempt(s)"]
+        lines = [f"{status_symbol} Java plan run – {attempt_count} attempt(s)"]
         for summary in telemetry.get("attempt_summaries", []):
             status_icon = "✅" if summary.get("status") == "success" else "❌"
             attempt_num = summary.get("attempt")
@@ -255,4 +255,4 @@ class CPLPlanOrchestrator:
         return dict(payload)
 
 
-__all__ = ["CPLPlanOrchestrator"]
+__all__ = ["PlanOrchestrator"]

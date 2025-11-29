@@ -1,60 +1,46 @@
 from __future__ import annotations
 
-from pathlib import Path
 from typing import List
 
 import pytest
 
-from dsl.cpl_inerpreter import (
-    CPLInterpreter,
-    CPLRuntimeError,
-    DeferredExecutionOptions,
-    ExecutionTracer,
-    parse_cpl,
-    load_cpl_parser,
-)
-from dsl.deferred_planner import DeferredFunctionPrompt
-
-GRAMMAR_PATH = Path(__file__).resolve().parents[2] / "dsl" / "cpl.lark"
+from llmflow.planning.deferred_planner import DeferredFunctionPrompt
+from llmflow.planning.runtime.ast import DeferredExecutionOptions
+from llmflow.planning.runtime.interpreter import PlanInterpreter, PlanRuntimeError
+from llmflow.planning.runtime.parser import parse_java_plan
+from llmflow.runtime.syscall_registry import SyscallRegistry
 
 
-@pytest.fixture(scope="session")
-def cpl_parser():
-    return load_cpl_parser(str(GRAMMAR_PATH))
-
-
-def _parse(source: str, parser):
-    return parse_cpl(source, parser)
-
-
-def _build_interpreter(source: str, parser, planner=None, options=None, log_sink: List[str] | None = None):
-    plan = _parse(source, parser)
+def _build_interpreter(source: str, planner=None, options=None, log_sink: List[str] | None = None):
+    plan = parse_java_plan(source)
     messages: List[str] = log_sink if log_sink is not None else []
 
     def log_syscall(msg: str):
         messages.append(msg)
 
-    interpreter = CPLInterpreter(
+    registry = SyscallRegistry.from_mapping({"log": log_syscall})
+    interpreter = PlanInterpreter(
         plan,
-        syscalls={"log": log_syscall},
+        registry=registry,
         deferred_planner=planner,
-        deferred_options=options,
-        tracer=ExecutionTracer(enabled=False),
+        deferred_options=options or DeferredExecutionOptions(),
+        spec_text="SPEC",
     )
     return interpreter, messages
 
 
-def test_parse_deferred_function_declaration(cpl_parser):
-    plan = _parse(
-        """plan {
+def test_parse_deferred_function_declaration():
+    plan = parse_java_plan(
+        """
+        public class Plan {
             @Deferred
-            function perform() : Void;
+            public void perform();
 
-            function main() : Void {
+            public void main() {
                 return;
             }
-        }""",
-        cpl_parser,
+        }
+        """,
     )
 
     perform = plan.functions["perform"]
@@ -62,20 +48,21 @@ def test_parse_deferred_function_declaration(cpl_parser):
     assert perform.body is None
 
 
-def test_parse_deferred_with_stub_body(cpl_parser):
-    plan = _parse(
-        """plan {
+def test_parse_deferred_with_stub_body():
+    plan = parse_java_plan(
+        """
+        public class Plan {
             @Deferred
-            function perform() : Void {
+            public void perform() {
                 syscall.log("placeholder");
                 return;
             }
 
-            function main() : Void {
+            public void main() {
                 return;
             }
-        }""",
-        cpl_parser,
+        }
+        """,
     )
 
     perform = plan.functions["perform"]
@@ -84,7 +71,7 @@ def test_parse_deferred_with_stub_body(cpl_parser):
     assert len(perform.body) == 2
 
 
-def test_deferred_execution_invokes_planner_once(cpl_parser):
+def test_deferred_execution_invokes_planner_once():
     planner_calls: List[DeferredFunctionPrompt] = []
 
     def planner(prompt: DeferredFunctionPrompt) -> str:
@@ -92,16 +79,17 @@ def test_deferred_execution_invokes_planner_once(cpl_parser):
         return "{ syscall.log(\"from deferred\"); return; }"
 
     interpreter, messages = _build_interpreter(
-        """plan {
-            function main() : Void {
+        """
+        public class Plan {
+            public void main() {
                 perform();
                 return;
             }
 
             @Deferred
-            function perform() : Void;
-        }""",
-        cpl_parser,
+            public void perform();
+        }
+        """,
         planner=planner,
     )
 
@@ -112,7 +100,7 @@ def test_deferred_execution_invokes_planner_once(cpl_parser):
     assert planner_calls[0].context.function_name == "perform"
 
 
-def test_deferred_execution_reuses_cached_body(cpl_parser):
+def test_deferred_execution_reuses_cached_body():
     planner_calls: List[DeferredFunctionPrompt] = []
 
     def planner(prompt: DeferredFunctionPrompt) -> str:
@@ -120,17 +108,18 @@ def test_deferred_execution_reuses_cached_body(cpl_parser):
         return "{ syscall.log(\"cached run\"); return; }"
 
     interpreter, messages = _build_interpreter(
-        """plan {
-            function main() : Void {
+        """
+        public class Plan {
+            public void main() {
                 perform();
                 perform();
                 return;
             }
 
             @Deferred
-            function perform() : Void;
-        }""",
-        cpl_parser,
+            public void perform();
+        }
+        """,
         planner=planner,
     )
 
@@ -140,7 +129,7 @@ def test_deferred_execution_reuses_cached_body(cpl_parser):
     assert len(planner_calls) == 1
 
 
-def test_deferred_execution_without_cache_regenerates(cpl_parser):
+def test_deferred_execution_without_cache_regenerates():
     planner_calls: List[DeferredFunctionPrompt] = []
 
     def planner(prompt: DeferredFunctionPrompt) -> str:
@@ -149,17 +138,18 @@ def test_deferred_execution_without_cache_regenerates(cpl_parser):
 
     options = DeferredExecutionOptions(reuse_cached_bodies=False)
     interpreter, _ = _build_interpreter(
-        """plan {
-            function main() : Void {
+        """
+        public class Plan {
+            public void main() {
                 perform();
                 perform();
                 return;
             }
 
             @Deferred
-            function perform() : Void;
-        }""",
-        cpl_parser,
+            public void perform();
+        }
+        """,
         planner=planner,
         options=options,
     )
@@ -169,29 +159,30 @@ def test_deferred_execution_without_cache_regenerates(cpl_parser):
     assert len(planner_calls) == 2
 
 
-def test_invalid_synthesis_raises_runtime_error(cpl_parser):
+def test_invalid_synthesis_raises_runtime_error():
     def planner(_prompt: DeferredFunctionPrompt) -> str:
         return "not a block"
 
     interpreter, _ = _build_interpreter(
-        """plan {
-            function main() : Void {
+        """
+        public class Plan {
+            public void main() {
                 perform();
                 return;
             }
 
             @Deferred
-            function perform() : Void;
-        }""",
-        cpl_parser,
+            public void perform();
+        }
+        """,
         planner=planner,
     )
 
-    with pytest.raises(CPLRuntimeError):
+    with pytest.raises(PlanRuntimeError):
         interpreter.run()
 
 
-def test_nested_deferred_functions(cpl_parser):
+def test_nested_deferred_functions():
     planner_calls: List[str] = []
 
     def planner(prompt: DeferredFunctionPrompt) -> str:
@@ -201,19 +192,20 @@ def test_nested_deferred_functions(cpl_parser):
         return "{ syscall.log(msg); return; }"
 
     interpreter, messages = _build_interpreter(
-        """plan {
-            function main() : Void {
+        """
+        public class Plan {
+            public void main() {
                 outer();
                 return;
             }
 
             @Deferred
-            function outer() : Void;
+            public void outer();
 
             @Deferred
-            function inner(msg: String) : Void;
-        }""",
-        cpl_parser,
+            public void inner(String msg);
+        }
+        """,
         planner=planner,
     )
 
@@ -223,19 +215,20 @@ def test_nested_deferred_functions(cpl_parser):
     assert planner_calls == ["outer", "inner"]
 
 
-def test_deferred_function_without_planner_errors(cpl_parser):
+def test_deferred_function_without_planner_errors():
     interpreter, _ = _build_interpreter(
-        """plan {
-            function main() : Void {
+        """
+        public class Plan {
+            public void main() {
                 perform();
                 return;
             }
 
             @Deferred
-            function perform() : Void;
-        }""",
-        cpl_parser,
+            public void perform();
+        }
+        """,
     )
 
-    with pytest.raises(CPLRuntimeError, match="Deferred function 'perform'"):
+    with pytest.raises(PlanRuntimeError, match="Deferred function 'perform'"):
         interpreter.run()

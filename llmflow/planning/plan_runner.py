@@ -1,27 +1,27 @@
-"""Execution helpers for Cortex Planning Language (CPL) programs."""
+"""Execution helpers for Java plan programs."""
 from __future__ import annotations
 
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Sequence
 
-from dsl.cpl_inerpreter import DeferredExecutionOptions
-from dsl.plan_executor import PlanExecutor
-from dsl.syscall_registry import SyscallRegistry
-from dsl.syscalls import build_default_syscall_registry
-from dsl.deferred_planner import DeferredFunctionPrompt
+from llmflow.runtime.syscall_registry import SyscallRegistry
+from llmflow.runtime.syscalls import build_default_syscall_registry
 
-from .cpl_planner import CPLPlanningError
+from .deferred_planner import DeferredFunctionPrompt
+from .executor import PlanExecutor
+from .java_planner import JavaPlanningError
+from .runtime.ast import DeferredExecutionOptions
 
 
-_PROJECT_ROOT = Path(__file__).resolve().parents[2]
-_DEFAULT_SPEC_PATH = _PROJECT_ROOT / "dsl" / "planning.md"
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
+_DEFAULT_SPEC_PATH = _PROJECT_ROOT / "planning" / "java_planning.md"
 
 
 class DeferredBodyPlanner:
-    """Adapter that uses an LLM to synthesize deferred CPL function bodies."""
+    """Adapter that uses an LLM to synthesize deferred Java function bodies."""
 
     _SYSTEM_PROMPT = (
-        "You generate Cortex Planning Language (CPL) deferred function bodies."
+        "You generate Java plan function bodies."
         " Respond with only the function body block (including braces) that satisfies"
         " the user's request."
     )
@@ -37,26 +37,26 @@ class DeferredBodyPlanner:
         response = self._llm_client.generate(messages=messages, tools=None)
         body = response.get("content") if isinstance(response, dict) else None
         if not isinstance(body, str):
-            raise CPLPlanningError("Deferred planner did not return textual content.")
+            raise JavaPlanningError("Deferred planner did not return textual content.")
         normalized = body.strip()
         if not normalized:
-            raise CPLPlanningError("Deferred planner returned an empty body.")
+            raise JavaPlanningError("Deferred planner returned an empty body.")
         return normalized
 
 
-class CPLPlanRunner:
-    """High-level wrapper that executes CPL plans using :class:`PlanExecutor`."""
+class PlanRunner:
+    """High-level wrapper that executes Java plans using :class:`PlanExecutor`."""
 
     def __init__(
         self,
         *,
         registry_factory: Optional[Callable[[], SyscallRegistry]] = None,
         deferred_planner: Optional[Callable[[DeferredFunctionPrompt], str]] = None,
-        dsl_specification: Optional[str] = None,
+        specification: Optional[str] = None,
     ):
         self._registry_factory = registry_factory or build_default_syscall_registry
         self._deferred_planner = deferred_planner
-        self._dsl_specification = (dsl_specification or self._load_specification()).strip()
+        self._specification = (specification or self._load_specification()).strip()
 
     def execute(
         self,
@@ -80,7 +80,7 @@ class CPLPlanRunner:
             registry,
             deferred_planner=self._deferred_planner,
             deferred_options=deferred_options,
-            dsl_specification=self._dsl_specification,
+            specification=self._specification,
         )
         extra_metadata = dict(metadata) if metadata else None
         return executor.execute_from_string(
@@ -94,9 +94,9 @@ class CPLPlanRunner:
         try:
             return _DEFAULT_SPEC_PATH.read_text(encoding="utf-8")
         except OSError as exc:  # pragma: no cover - depends on filesystem
-            raise CPLPlanningError(
-                f"Unable to load CPL specification from '{_DEFAULT_SPEC_PATH}'."
+            raise JavaPlanningError(
+                f"Unable to load plan specification from '{_DEFAULT_SPEC_PATH}'."
             ) from exc
 
 
-__all__ = ["CPLPlanRunner", "DeferredBodyPlanner"]
+__all__ = ["PlanRunner", "DeferredBodyPlanner"]

@@ -5,7 +5,9 @@ from __future__ import annotations
 import os
 from typing import Any, Dict, List, Optional
 
+import instructor
 import yaml
+from pydantic import BaseModel
 
 from llmflow.providers import (
     GenericProvider,
@@ -25,9 +27,12 @@ class LLMClient:
             raise ValueError("llm_config.yaml must specify a 'model'.")
 
         provider_name = provider_config.get("provider", "").lower()
+        self.provider_name = provider_name
+        self.provider_config = dict(provider_config)
         self.provider = self._build_provider(provider_name, provider_config)
         self.default_request_timeout = provider_config.get("request_timeout")
         self.provider.validate_tool_support()
+        self._structured_client = None
 
     def _load_config(self, file_path: str) -> Dict[str, Any]:
         try:
@@ -93,4 +98,63 @@ class LLMClient:
             model=current_model,
             tools=tools,
             **kwargs,
+        )
+
+    # ------------------------------------------------------------------
+    # Structured output helpers
+
+    def structured_generate(
+        self,
+        *,
+        messages: List[Dict[str, Any]],
+        response_model: Any,
+        **kwargs: Any,
+    ) -> BaseModel:
+        """Generate a structured response validated by ``response_model``."""
+
+        kwargs.pop("force_tool_call", None)
+        kwargs.setdefault("parallel_tool_calls", False)
+        client = self._ensure_structured_client()
+        return client.create(
+            messages=messages,
+            response_model=response_model,
+            **kwargs,
+        )
+
+    def _ensure_structured_client(self):
+        if self._structured_client is None:
+            self._structured_client = self._build_structured_client()
+        return self._structured_client
+
+    def _build_structured_client(self):
+        if not self.provider_name:
+            raise RuntimeError("Structured generation requires a configured provider.")
+
+        provider_id = f"{self.provider_name}/{self.model}"
+        kwargs = self._build_structured_kwargs()
+        return instructor.from_provider(
+            provider_id,
+            mode=instructor.Mode.TOOLS,
+            **kwargs,
+        )
+
+    def _build_structured_kwargs(self) -> Dict[str, Any]:
+        provider = self.provider_name
+        if provider == "openai":
+            api_key = self.provider_config.get("api_key") or os.getenv("OPENAI_API_KEY")
+            if not api_key:
+                raise RuntimeError(
+                    "OpenAI structured generation requires an API key in the config or OPENAI_API_KEY."
+                )
+            return {"api_key": api_key}
+
+        if provider == "ollama":
+            base_url = self.provider_config.get("base_url") or "http://localhost:11434"
+            normalized_url = base_url.rstrip("/")
+            if not normalized_url.endswith("/v1"):
+                normalized_url = f"{normalized_url}/v1"
+            return {"base_url": normalized_url}
+
+        raise RuntimeError(
+            f"Structured generation is not supported for provider '{provider}'."
         )

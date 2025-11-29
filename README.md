@@ -178,22 +178,23 @@ pip install -r requirements.txt
 python main.py --event post_commit --repo https://github.com/your/repo
 ```
 
-## 🛠 CPL Plan Executor
+## 🛠 Java Plan Executor
 
-You can execute CPL plans programmatically without touching the lower-level parser/interpreter APIs. The `PlanExecutor` handles parsing, validation, execution, and tracing in one shot:
+You can execute the new Java-based plans programmatically without touching the
+lower-level parser/interpreter APIs. The `PlanExecutor` handles parsing,
+validation, execution, and tracing in one shot:
 
 ```python
-from dsl.plan_executor import PlanExecutor
-from dsl.syscall_registry import SyscallRegistry
+from llmflow.planning.executor import PlanExecutor
+from llmflow.runtime.syscalls import build_default_syscall_registry
 
-registry = SyscallRegistry()
-registry.register("log", print)
-
+registry = build_default_syscall_registry()
 executor = PlanExecutor(registry)
 
-plan = """plan {
-	function main() : Void {
-		syscall.log("Hello, CPL!");
+plan = """
+public class Plan {
+	public void main() {
+		syscall.log("Hello, Cortex!");
 		return;
 	}
 }
@@ -207,19 +208,22 @@ else:
 	print("Plan failed", result["errors"])
 ```
 
-`result` is always a dict that contains a `success` flag, the interpreter `return_value`, structured `errors`, optional `trace` events, and any metadata you pass in.
+`result` is always a dict that contains a `success` flag, the interpreter
+`return_value`, structured `errors`, optional `trace` events, and any metadata
+you pass in.
 
 ## 🔌 Syscall Modules
 
-The DSL now ships with a batteries-included syscall registry so CPL plans can invoke
-real git, filesystem, and Qlty tools without extra plumbing. Use
-`dsl.syscalls.register_default_syscalls` (or the convenience constructor
-`dsl.syscalls.build_default_syscall_registry`) to populate a `SyscallRegistry`
-before handing it to the interpreter or `PlanExecutor`:
+The runtime ships with a batteries-included syscall registry so Java plans can
+invoke real git, filesystem, and Qlty tools without extra plumbing. Use
+`llmflow.runtime.syscalls.register_default_syscalls` (or the convenience
+constructor `llmflow.runtime.syscalls.build_default_syscall_registry`) to
+populate a `SyscallRegistry` before handing it to the interpreter or
+`PlanExecutor`:
 
 ```python
-from dsl.plan_executor import PlanExecutor
-from dsl.syscalls import build_default_syscall_registry
+from llmflow.planning.executor import PlanExecutor
+from llmflow.runtime.syscalls import build_default_syscall_registry
 
 registry = build_default_syscall_registry()
 executor = PlanExecutor(registry)
@@ -228,7 +232,7 @@ executor = PlanExecutor(registry)
 # register_default_syscalls(registry, logger=my_logger)
 ```
 
-The default modules expose the following syscall names to CPL plans:
+The default modules expose the following syscall names to plans:
 
 - Utility: `log`
 - Git: `cloneRepo`, `createBranch`, `suggestBranchName`, `switchBranch`,
@@ -237,25 +241,26 @@ The default modules expose the following syscall names to CPL plans:
 - Files: `listFilesInTree`, `readTextFile`, `overwriteTextFile`, `applyTextRewrite`
 - Qlty: `qltyListIssues`, `qltyGetFirstIssue`
 
-Each syscall raises `ToolError` (catchable via `try`/`catch` in CPL) when the
-underlying tool reports a failure, so plans can rely on consistent error handling.
+Each syscall raises `ToolError` (catchable via `try`/`catch` blocks) when the
+underlying tool reports a failure, so plans can rely on consistent error
+handling.
 
-## 🧠 CPL Plan Synthesizer
+## 🧠 Java Plan Synthesizer
 
 Priority 5 introduces a dedicated planner hook so agents can request structured
-CPL programs before execution. The `CPLPlanner` class automatically loads the DSL
-specification from `dsl/planning.md`, injects the allowed syscall list, and
-returns the raw CPL source together with request metadata.
+Java programs before execution. The `JavaPlanner` class automatically loads the
+planning specification, injects the allowed syscall list, and returns the raw
+Java source together with request metadata.
 
 ```python
 from llmflow.llm_client import LLMClient
-from llmflow.planning import CPLPlanRequest, CPLPlanner
+from llmflow.planning import JavaPlanRequest, JavaPlanner
 
 llm = LLMClient()
-planner = CPLPlanner(llm)
+planner = JavaPlanner(llm)
 
 plan = planner.generate_plan(
-	CPLPlanRequest(
+	JavaPlanRequest(
 		task="Triage the failing lint issue",
 		goals=["Fetch the issue details", "Reproduce and patch the failure"],
 		allowed_syscalls=["log", "qltyListIssues", "readTextFile"],
@@ -265,31 +270,31 @@ plan = planner.generate_plan(
 print(plan.plan_source)
 ```
 
-Later Priority 5 steps will feed this plan into the CPL runtime so the agent can
-execute the synthesized workflow end-to-end.
+Later steps feed this plan into the Java runtime so the agent can execute the
+synthesized workflow end-to-end.
 
-### 🔁 Cortex Planning Language (CPL) Plan Retry & Telemetry
+### 🔁 Java Plan Retry & Telemetry
 
-Use `CPLPlanOrchestrator` when you want the full generate → execute → repair
-loop with structured reporting. The orchestrator automatically:
+Use `PlanOrchestrator` when you want the full generate → execute → repair loop
+with structured reporting. The orchestrator automatically:
 
 - retries failed plans (validation or runtime) with bounded repair hints,
 - captures per-attempt traces/tool usage, and
 - returns a concise human-readable summary you can drop into agent memory.
 
 ```python
-from llmflow.planning import CPLPlanOrchestrator, CPLPlanRequest, CPLPlanner
-from llmflow.planning.plan_runner import CPLPlanRunner
+from llmflow.planning import JavaPlanRequest, JavaPlanner, PlanOrchestrator
+from llmflow.planning.plan_runner import PlanRunner
 
-planner = CPLPlanner(llm_client)
-orchestrator = CPLPlanOrchestrator(
+planner = JavaPlanner(llm_client)
+orchestrator = PlanOrchestrator(
 	planner,
-	runner_factory=lambda: CPLPlanRunner(),
+	runner_factory=lambda: PlanRunner(),
 	max_retries=2,
 )
 
 result = orchestrator.execute_with_retries(
-	CPLPlanRequest(
+	JavaPlanRequest(
 		task="Repair the failing lint issue",
 		goals=["Reproduce", "Patch", "Verify"],
 		allowed_syscalls=["log", "qltyListIssues"],
@@ -297,7 +302,7 @@ result = orchestrator.execute_with_retries(
 	capture_trace=True,
 )
 
-print(result["summary"])          # e.g., "✅ CPL plan run – 2 attempt(s) …"
+print(result["summary"])          # e.g., "✅ Java plan run – 2 attempt(s) …"
 print(result["telemetry"])        # structured data for logs or analytics
 ```
 
@@ -305,18 +310,18 @@ When integrating with the agent loop, write `result["summary"]` back to the
 conversation and stash `result["telemetry"]` for diagnostics so controllers and
 users can understand exactly what each plan attempted.
 
-## 🧭 CPL-Only Agent Workflow
+## 🧭 Java Plan Agent Workflow
 
-The top-level `Agent` now relies exclusively on the CPL planner/orchestrator
+The top-level `Agent` now relies exclusively on the Java planner/orchestrator
 stack. Legacy iterative loops have been removed in favour of a deterministic
 pipeline:
 
-1. Build a `CPLPlanRequest` from the incoming task, goal memory, and the
-	filtered syscall registry (tool access is controlled via tags).
-2. Ask `CPLPlanner` to generate the program and schedule it through
-	`CPLPlanOrchestrator`, which handles retries and repair prompts.
+1. Build a `JavaPlanRequest` from the incoming task, goal memory, and the
+   filtered syscall registry (tool access is controlled via tags).
+2. Ask `JavaPlanner` to generate the program and schedule it through
+   `PlanOrchestrator`, which handles retries and repair prompts.
 3. Stream summaries, telemetry, and tool traces back into the agent memory so
-	subsequent turns can reason about successes or blockers.
+   subsequent turns can reason about successes or blockers.
 
 Agents expose a `plan_max_retries` parameter (CLI/config key
 `plan_max_retries`) that caps orchestrator attempts per user turn. Setting it to

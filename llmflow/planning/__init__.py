@@ -1,17 +1,17 @@
-"""Planning helpers for generating CPL programs."""
+"""Planning helpers for generating Java plans."""
 
-from .cpl_planner import (
-    CPLPlanRequest,
-    CPLPlanResult,
-    CPLPlanner,
-    CPLPlanningError,
+from .java_planner import (
+    JavaPlanRequest,
+    JavaPlanResult,
+    JavaPlanner,
+    JavaPlanningError,
 )
-from .plan_orchestrator import CPLPlanOrchestrator
+from .plan_orchestrator import PlanOrchestrator
 
 __all__ = [
-    "CPLPlanRequest",
-    "CPLPlanResult",
-    "CPLPlanner",
-    "CPLPlanningError",
-    "CPLPlanOrchestrator",
+    "JavaPlanRequest",
+    "JavaPlanResult",
+    "JavaPlanner",
+    "JavaPlanningError",
+    "PlanOrchestrator",
 ]

@@ -1,0 +1,6 @@
+Collecting javalang
+  Downloading javalang-0.13.0-py3-none-any.whl.metadata (805 bytes)
+Requirement already satisfied: six in ./.venv/lib/python3.13/site-packages (from javalang) (1.17.0)
+Downloading javalang-0.13.0-py3-none-any.whl (22 kB)
+Installing collected packages: javalang
+Successfully installed javalang-0.13.0

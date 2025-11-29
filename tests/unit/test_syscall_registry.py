@@ -2,7 +2,7 @@ import types
 
 import pytest
 
-from dsl.syscall_registry import SyscallRegistry
+from llmflow.runtime.syscall_registry import SyscallRegistry
 
 
 def test_register_and_get_syscall():

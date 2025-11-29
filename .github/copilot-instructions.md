@@ -26,6 +26,7 @@ When adding Copilot Custom Instructions, include language such as:
 7. **Quality Gates:** Default to the repo’s automation stack—`black`, `isort`, `pylint`, and `pytest`—and remind users to run `pre-commit` hooks or the equivalent commands before committing.
 8. **Module Size & Structure:** Keep each source file under 300 lines; when a module grows, refactor code into helpers or new files instead of squeezing additional logic in.
 9. **Fail Fast:** Do not introduce fallbacks that hide missing capabilities. Raise explicit errors when prerequisites (APIs, SDKs, tool support) aren’t available so issues surface immediately. Do not introduce fallbacks for unexpected behavior. Fail fast and visibly.
+10. **Structured LLM Calls:** Always route structured LLM responses through `LLMClient.structured_generate` (Instructor + Pydantic). Define explicit `BaseModel` schemas, rely on Instructor for validation/retries, and never add bespoke JSON parsing or regex extraction for model outputs.
 
 ## Review Checklist
 Before accepting Copilot changes:

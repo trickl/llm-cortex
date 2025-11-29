@@ -1,5 +1,8 @@
 openai>=1.0.0
+instructor>=1.13.0
+pydantic>=2.7.0
 lark>=1.1.9
+javalang>=0.13.0
 requests>=2.20.0
 beautifulsoup4>=4.9.0
 selenium>=4.0.0

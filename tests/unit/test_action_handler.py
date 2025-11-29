@@ -5,6 +5,10 @@ from __future__ import annotations
 import json
 from typing import Dict, Any
 
+import pytest
+
+pytest.skip("ActionHandler module has been retired in favor of Java planning", allow_module_level=True)
+
 from llmflow.core.action_handler import ActionHandler
 from llmflow.tools.tool_decorator import register_tool
 

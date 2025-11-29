@@ -1,11 +1,11 @@
-"""CPL-native Agent orchestrator.
+"""Java-plan Agent orchestrator.
 
 This module provides a single entry point for building agents that rely on the
-Cortex Planning Language (CPL). Instead of iteratively calling tools directly
+Cortex Java planning workflow. Instead of iteratively calling tools directly
 from LLM responses, the agent now:
 
-1. Synthesizes a CPL plan with :class:`~llmflow.planning.CPLPlanner`.
-2. Executes the plan via :class:`~llmflow.planning.plan_runner.CPLPlanRunner`.
+1. Synthesizes a Java plan with :class:`~llmflow.planning.JavaPlanner`.
+2. Executes the plan via :class:`~llmflow.planning.plan_runner.PlanRunner`.
 3. Surfaces the orchestrator summary (or plan return value) back to the user.
 
 Tool exposure is controlled through syscall whitelists derived from the default
@@ -18,12 +18,12 @@ from __future__ import annotations
 import json
 from typing import Any, Callable, Dict, List, Optional, Sequence, Set
 
-from dsl.syscalls import build_default_syscall_registry
+from llmflow.runtime.syscalls import build_default_syscall_registry
 
 from llmflow.llm_client import LLMClient
 from llmflow.logging_utils import RunArtifactManager, RunLogContext
-from llmflow.planning import CPLPlanOrchestrator, CPLPlanRequest, CPLPlanner
-from llmflow.planning.plan_runner import CPLPlanRunner, DeferredBodyPlanner
+from llmflow.planning import JavaPlanner, JavaPlanRequest, PlanOrchestrator
+from llmflow.planning.plan_runner import PlanRunner, DeferredBodyPlanner
 from llmflow.telemetry.mermaid_recorder import MermaidSequenceRecorder
 from llmflow.tools import get_module_for_tool_name, load_tool_module
 from llmflow.tools.tool_registry import get_tool_schema, get_tool_tags
@@ -33,10 +33,10 @@ from .goals import GoalManager
 from .memory import Memory
 
 
-_CPL_PLANNING_GUIDANCE = (
-    "When responding you must first synthesize a complete CPL (Cortex Planning Language) plan "
-    "that conforms to the `define_context_planning_language` tool specification. Do not execute "
-    "tools directly; emit only CPL program text for the runtime to execute."
+_JAVA_PLANNING_GUIDANCE = (
+    "When responding you must first synthesize a complete Java plan (public class Plan) "
+    "that conforms to the `define_java_plan` tool specification. Do not execute tools "
+    "directly; emit only Java source for the runtime to execute."
 )
 _SYSTEM_PROMPT_TEMPLATE = (
     "{{ base_prompt }}\n\n"
@@ -75,7 +75,7 @@ _SYS_CALL_TOOL_MAP: Dict[str, Optional[str]] = {
 
 
 class Agent(AgentInstrumentationMixin):
-    """Goal-aware CPL orchestrator with syscall filtering."""
+    """Goal-aware Java plan orchestrator with syscall filtering."""
 
     _MAX_CONTEXT_TRACE = 100
 
@@ -83,7 +83,7 @@ class Agent(AgentInstrumentationMixin):
         self,
         llm_client: LLMClient,
         system_prompt: str = (
-            "You are a helpful AI assistant. You coordinate CPL plans to solve user"
+            "You are a helpful AI assistant. You coordinate structured Java plans to solve user"
             " requests using the available syscalls."
         ),
         initial_goals: Optional[List[Dict[str, Any]]] = None,
@@ -91,8 +91,8 @@ class Agent(AgentInstrumentationMixin):
         match_all_tags: bool = True,
         allowed_syscalls: Optional[Sequence[str]] = None,
         registry_factory: Optional[Callable[[], Any]] = None,
-        runner_factory: Optional[Callable[[], CPLPlanRunner]] = None,
-        planner: Optional[CPLPlanner] = None,
+        runner_factory: Optional[Callable[[], PlanRunner]] = None,
+        planner: Optional[JavaPlanner] = None,
         plan_max_retries: int = 1,
         capture_trace: bool = False,
         verbose: bool = True,
@@ -113,13 +113,13 @@ class Agent(AgentInstrumentationMixin):
         self._capture_trace = capture_trace
         self.plan_max_retries = max(plan_max_retries, 0)
         self._registry_factory = registry_factory or build_default_syscall_registry
-        self._planner = planner or CPLPlanner(llm_client)
+        self._planner = planner or JavaPlanner(llm_client)
         self._deferred_planner = DeferredBodyPlanner(llm_client)
         if runner_factory is not None:
             self._runner_factory = runner_factory
         else:
             self._runner_factory = self._build_default_runner_factory
-        self._orchestrator = CPLPlanOrchestrator(
+        self._orchestrator = PlanOrchestrator(
             self._planner,
             self._runner_factory,
             max_retries=self.plan_max_retries,
@@ -144,7 +144,7 @@ class Agent(AgentInstrumentationMixin):
         self._last_run_summary: Optional[str] = None
 
         if self.verbose:
-            print("Agent initialized for CPL planning.")
+            print("Agent initialized for Java planning.")
             print("System Prompt Template (spec omitted in logs):")
             print(self._system_prompt_template_preview)
             print(
@@ -157,7 +157,7 @@ class Agent(AgentInstrumentationMixin):
     # Public API
 
     def add_user_message_and_run(self, user_input: str) -> Optional[str]:
-        """Record ``user_input`` and execute a CPL plan once."""
+        """Record ``user_input`` and execute a Java plan once."""
 
         if not user_input or not user_input.strip():
             raise ValueError("user_input must be a non-empty string")
@@ -169,7 +169,7 @@ class Agent(AgentInstrumentationMixin):
             self._record_context_snapshot("pre_plan_request")
             plan_request = self._build_plan_request(user_input)
             if self.verbose:
-                print("Submitting CPL plan request...")
+                print("Submitting Java plan request...")
             result = self._orchestrator.execute_with_retries(
                 plan_request,
                 capture_trace=self._capture_trace,
@@ -195,8 +195,8 @@ class Agent(AgentInstrumentationMixin):
     # ------------------------------------------------------------------
     # Internal helpers
 
-    def _build_default_runner_factory(self) -> CPLPlanRunner:
-        return CPLPlanRunner(
+    def _build_default_runner_factory(self) -> PlanRunner:
+        return PlanRunner(
             registry_factory=self._registry_factory,
             deferred_planner=self._deferred_planner,
         )
@@ -281,16 +281,16 @@ class Agent(AgentInstrumentationMixin):
                 schemas.append(schema)
         return schemas
 
-    def _build_plan_request(self, user_input: str) -> CPLPlanRequest:
+    def _build_plan_request(self, user_input: str) -> JavaPlanRequest:
         goals = [goal.description for goal in self.goal_manager.goals]
         context_sections = [f"System prompt:\n{self.system_prompt.strip()}".strip()]
         if self._last_run_summary:
             context_sections.append(
-                f"Previous CPL summary:\n{self._last_run_summary.strip()}"
+                f"Previous plan summary:\n{self._last_run_summary.strip()}"
             )
         context_sections.append(self._format_recent_memory())
         context = "\n\n".join(section for section in context_sections if section)
-        return CPLPlanRequest(
+        return JavaPlanRequest(
             task=user_input.strip(),
             goals=goals,
             context=context,
@@ -326,7 +326,7 @@ class Agent(AgentInstrumentationMixin):
             return self._format_failure_message(errors, summary)
         if summary:
             return summary
-        return "CPL plan run finished without additional details."
+        return "Plan run finished without additional details."
 
     def _format_success_message(
         self,
@@ -341,7 +341,7 @@ class Agent(AgentInstrumentationMixin):
                 return json.dumps(return_value, ensure_ascii=False, indent=2)
             except TypeError:
                 return str(return_value)
-        return summary or "✅ CPL plan run completed successfully."
+        return summary or "✅ Java plan run completed successfully."
 
     def _format_failure_message(
         self,
@@ -367,7 +367,7 @@ class Agent(AgentInstrumentationMixin):
 
     def _append_context_trace(self, result: Dict[str, Any]) -> None:
         entry = {
-            "stage": "cpl_run",
+            "stage": "plan_run",
             "success": result.get("success", False),
             "attempts": len(result.get("attempts") or []),
             "summary": result.get("summary"),
@@ -383,10 +383,10 @@ class Agent(AgentInstrumentationMixin):
     def _render_system_prompt(self, base_prompt: str) -> tuple[str, str]:
         prompt = (base_prompt or "").strip()
         if not prompt:
-            prompt = "You are a helpful AI assistant that coordinates CPL plans."
+            prompt = "You are a helpful AI assistant that coordinates Java plans."
         replacements = {
             "{{ base_prompt }}": prompt,
-            "{{ planning_guidance }}": _CPL_PLANNING_GUIDANCE,
+            "{{ planning_guidance }}": _JAVA_PLANNING_GUIDANCE,
         }
         rendered = _SYSTEM_PROMPT_TEMPLATE
         preview = _SYSTEM_PROMPT_PREVIEW

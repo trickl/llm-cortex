@@ -3,7 +3,7 @@ from typing import Dict, List
 
 import pytest
 
-from llmflow.planning import CPLPlanOrchestrator, CPLPlanRequest
+from llmflow.planning import JavaPlanRequest, PlanOrchestrator
 
 
 @dataclass
@@ -18,9 +18,9 @@ class StubPlanResult:
 class DummyPlanner:
     def __init__(self, plans: List[str]):
         self._plans = list(plans)
-        self.requests: List[CPLPlanRequest] = []
+        self.requests: List[JavaPlanRequest] = []
 
-    def generate_plan(self, request: CPLPlanRequest) -> StubPlanResult:
+    def generate_plan(self, request: JavaPlanRequest) -> StubPlanResult:
         if not self._plans:
             raise RuntimeError("No more plans queued")
         self.requests.append(request)
@@ -60,18 +60,26 @@ def runner_factory():
 
 
 def test_orchestrator_succeeds_without_retries(runner_factory):
-    planner = DummyPlanner(["plan { function main() : Void { return; } }"])
+    planner = DummyPlanner([
+        """
+        public class Plan {
+            public void main() {
+                return;
+            }
+        }
+        """,
+    ])
     runner, make_runner = runner_factory([
         {"success": True, "errors": [], "metadata": {}},
     ])
-    orchestrator = CPLPlanOrchestrator(planner, make_runner)
-    request = CPLPlanRequest(task="Do thing", goals=["goal"])
+    orchestrator = PlanOrchestrator(planner, make_runner)
+    request = JavaPlanRequest(task="Do thing", goals=["goal"])
 
     result = orchestrator.execute_with_retries(request)
 
     assert result["success"] is True
     assert len(result["attempts"]) == 1
-    assert runner.calls[0]["plan_source"].startswith("plan")
+    assert runner.calls[0]["plan_source"].lstrip().startswith("public class Plan")
     assert planner.requests[0].task == "Do thing"
     assert "telemetry" in result
     assert "summary" in result
@@ -80,15 +88,27 @@ def test_orchestrator_succeeds_without_retries(runner_factory):
 
 def test_orchestrator_retries_and_returns_failure(runner_factory):
     planner = DummyPlanner([
-        "plan { function main() : Void { return; } }",
-        "plan { function main() : Void { return; } }",
+        """
+        public class Plan {
+            public void main() {
+                return;
+            }
+        }
+        """,
+        """
+        public class Plan {
+            public void main() {
+                return;
+            }
+        }
+        """,
     ])
     runner, make_runner = runner_factory([
         {"success": False, "errors": [{"type": "validation_error", "message": "missing main", "line": 3}]},
         {"success": False, "errors": []},
     ])
-    orchestrator = CPLPlanOrchestrator(planner, make_runner, max_retries=1)
-    request = CPLPlanRequest(task="Do thing", goals=["goal"], additional_constraints=["Stay safe"])
+    orchestrator = PlanOrchestrator(planner, make_runner, max_retries=1)
+    request = JavaPlanRequest(task="Do thing", goals=["goal"], additional_constraints=["Stay safe"])
 
     result = orchestrator.execute_with_retries(request)
 
@@ -101,7 +121,15 @@ def test_orchestrator_retries_and_returns_failure(runner_factory):
 
 
 def test_telemetry_includes_tool_usage(runner_factory):
-    planner = DummyPlanner(["plan { function main() : Void { return; } }"])
+    planner = DummyPlanner([
+        """
+        public class Plan {
+            public void main() {
+                return;
+            }
+        }
+        """,
+    ])
     runner, make_runner = runner_factory([
         {
             "success": True,
@@ -114,8 +142,8 @@ def test_telemetry_includes_tool_usage(runner_factory):
             ],
         }
     ])
-    orchestrator = CPLPlanOrchestrator(planner, make_runner)
-    request = CPLPlanRequest(task="Do thing", goals=["goal"])
+    orchestrator = PlanOrchestrator(planner, make_runner)
+    request = JavaPlanRequest(task="Do thing", goals=["goal"])
 
     result = orchestrator.execute_with_retries(request)
 

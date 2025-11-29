@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 import requests
 
@@ -28,6 +28,8 @@ class OllamaProvider(LLMProviderInterface):
         self.chat_endpoint = f"{self.base_url}/api/chat"
         self.default_options = default_options or {}
         self.tool_check_timeout = tool_check_timeout
+        self._explicit_tool_choice_supported = True
+        self._tool_choice_warning_emitted = False
 
     def validate_tool_support(self) -> None:
         if not self._probe_tool_support():
@@ -35,8 +37,17 @@ class OllamaProvider(LLMProviderInterface):
                 "The configured Ollama model does not support tool/function calls. "
                 "Choose or fine-tune a model with OpenAI-compatible tool calling."
             )
+        # Determine whether the model honors explicit function targeting.
+        self._explicit_tool_choice_supported = self._probe_tool_support(
+            tool_choice={"type": "function", "function": {"name": "test_fn"}}
+        )
+        if not self._explicit_tool_choice_supported:
+            print(
+                "[OllamaProvider] Warning: model ignored explicit tool_choice requests; "
+                "falling back to 'required' enforcement when only one tool is available."
+            )
 
-    def _probe_tool_support(self) -> bool:
+    def _probe_tool_support(self, tool_choice: Optional[Dict[str, Any]] = None) -> bool:
         payload = {
             "model": self.model_name,
             "messages": [
@@ -57,6 +68,9 @@ class OllamaProvider(LLMProviderInterface):
             ],
             "stream": False,
         }
+
+        if tool_choice is not None:
+            payload["tool_choice"] = tool_choice
 
         try:
             response = requests.post(
@@ -96,10 +110,16 @@ class OllamaProvider(LLMProviderInterface):
             payload["options"] = options
 
         tool_choice = kwargs.get("tool_choice")
+        force_tool_call = kwargs.get("force_tool_call", False)
         if tools:
             payload["tools"] = tools
-            if tool_choice is not None:
-                payload["tool_choice"] = tool_choice
+            normalized_choice = self._determine_tool_choice(
+                tool_choice,
+                tools,
+                force_tool_call,
+            )
+            if normalized_choice is not None:
+                payload["tool_choice"] = normalized_choice
             else:
                 payload.setdefault("tool_choice", "auto")
 
@@ -137,3 +157,29 @@ class OllamaProvider(LLMProviderInterface):
             "content": content,
             "tool_calls": tool_calls,
         }
+
+    def _determine_tool_choice(
+        self,
+        requested_choice: Optional[Any],
+        tools: Sequence[Dict[str, Any]],
+        force_tool_call: bool,
+    ) -> Optional[Any]:
+        if requested_choice is None:
+            if force_tool_call and len(tools) == 1:
+                return "required"
+            return None
+        if isinstance(requested_choice, str):
+            return requested_choice
+        if isinstance(requested_choice, dict):
+            if self._explicit_tool_choice_supported:
+                return requested_choice
+            if len(tools) == 1:
+                return "required"
+            if not self._tool_choice_warning_emitted:
+                print(
+                    "[OllamaProvider] Warning: Cannot target a specific tool when multiple options exist; "
+                    "falling back to automatic selection."
+                )
+                self._tool_choice_warning_emitted = True
+            return "auto"
+        return None

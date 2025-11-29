@@ -1,45 +1,36 @@
-import json
-
 import pytest
 
-from llmflow.planning import CPLPlanRequest, CPLPlanner, CPLPlanningError
+from llmflow.planning import JavaPlanRequest, JavaPlanner, JavaPlanningError
+
+
+JAVA_PLAN = """
+public class Plan {
+    public void main() {
+        syscall.log("hello");
+        return;
+    }
+}
+""".strip()
 
 
 class DummyLLMClient:
-    def __init__(self, response):
-        if isinstance(response, str):
-            response = {"role": "assistant", "content": response}
-        self._response = response
+    def __init__(self, payload):
+        self.payload = payload
         self.messages = None
-        self.tools = None
         self.kwargs = None
+        self.response_model = None
 
-    def generate(self, messages, tools=None, **kwargs):
+    def structured_generate(self, *, messages, response_model, **kwargs):
         self.messages = messages
-        self.tools = tools
         self.kwargs = kwargs
-        return self._response
+        self.response_model = response_model
+        return response_model(**self.payload)
 
 
 def test_planner_builds_prompt_and_returns_plan():
-    plan_text = "plan { function main() : Void { syscall.log(\"hello\"); return; } }"
-    response = {
-        "role": "assistant",
-        "content": None,
-        "tool_calls": [
-            {
-                "id": "call-1",
-                "type": "function",
-                "function": {
-                    "name": "define_context_planning_language",
-                    "arguments": json.dumps({"cpl": plan_text}),
-                },
-            }
-        ],
-    }
-    client = DummyLLMClient(response)
-    planner = CPLPlanner(client, dsl_specification="SPEC CONTENT")
-    request = CPLPlanRequest(
+    client = DummyLLMClient({"java": JAVA_PLAN})
+    planner = JavaPlanner(client, specification="SPEC CONTENT")
+    request = JavaPlanRequest(
         task="Fix the reported lint issue",
         goals=["Diagnose the lint failure", "Apply a minimal patch"],
         context="Repository: example, Branch: main",
@@ -48,52 +39,36 @@ def test_planner_builds_prompt_and_returns_plan():
 
     result = planner.generate_plan(request)
 
-    assert result.plan_source.lstrip().startswith("plan")
+    assert result.plan_source.startswith("public class Plan")
     assert result.metadata["allowed_syscalls"] == ["cloneRepo", "log"]
-    assert client.messages[0]["role"] == "system"
+    assert "available_tools" in client.messages[0]["content"]
     assert "cloneRepo" in client.messages[1]["content"]
-    assert (
-        client.tools is not None
-        and client.tools[0]["function"]["name"] == "define_context_planning_language"
-    )
-    assert "SPEC CONTENT" in client.tools[0]["function"]["description"]
-    expected_choice = {"type": "function", "function": {"name": "define_context_planning_language"}}
-    assert client.kwargs.get("tool_choice") == expected_choice
+    tool_choice = client.kwargs.get("tool_choice")
+    assert tool_choice["function"]["name"] == "define_java_plan"
+    tools = client.kwargs.get("tools")
+    assert tools and tools[0]["function"]["name"] == "define_java_plan"
 
 
-def test_planner_extracts_plan_from_tool_call():
-    plan_text = "plan { function main() : Void { syscall.log(\"hi\"); return; } }"
-    response = {
-        "role": "assistant",
-        "content": None,
-        "tool_calls": [
-            {
-                "id": "call-1",
-                "type": "function",
-                "function": {
-                    "name": "define_context_planning_language",
-                    "arguments": json.dumps({"cpl": plan_text, "notes": "ok"}),
-                },
-            }
-        ],
-    }
-    client = DummyLLMClient(response)
-    planner = CPLPlanner(client, dsl_specification="SPEC CONTENT")
-    result = planner.generate_plan(CPLPlanRequest(task="Do work"))
+def test_planner_includes_planner_notes():
+    client = DummyLLMClient({"java": JAVA_PLAN, "notes": "ok"})
+    planner = JavaPlanner(client, specification="SPEC CONTENT")
+    result = planner.generate_plan(JavaPlanRequest(task="Do work"))
 
-    assert result.plan_source == plan_text
+    assert result.plan_source == JAVA_PLAN
     assert result.metadata.get("planner_notes") == "ok"
 
 
-def test_planner_requires_tool_call():
-    client = DummyLLMClient(
-        {
-            "role": "assistant",
-            "content": "plan { function main() : Void { return; } }",
-            "tool_calls": None,
-        }
-    )
-    planner = CPLPlanner(client, dsl_specification="SPEC CONTENT")
+def test_planner_flattens_list_notes():
+    client = DummyLLMClient({"java": JAVA_PLAN, "notes": ["first", "second"]})
+    planner = JavaPlanner(client, specification="SPEC CONTENT")
+    result = planner.generate_plan(JavaPlanRequest(task="Do work"))
 
-    with pytest.raises(CPLPlanningError):
-        planner.generate_plan(CPLPlanRequest(task="Summarize"))
+    assert result.metadata.get("planner_notes") == "first\n\nsecond"
+
+
+def test_planner_raises_on_invalid_payload():
+    client = DummyLLMClient({"java": "class Nope {}"})
+    planner = JavaPlanner(client, specification="SPEC CONTENT")
+
+    with pytest.raises(JavaPlanningError):
+        planner.generate_plan(JavaPlanRequest(task="Summarize"))

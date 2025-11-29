@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import pytest
 
-from dsl.cpl_inerpreter import ToolError
-from dsl.syscall_registry import SyscallRegistry
-from dsl.syscalls import register_default_syscalls
-from dsl.syscalls.files import FileSyscalls
-from dsl.syscalls.git import GitSyscalls
-from dsl.syscalls.qlty import QltySyscalls
+from llmflow.runtime.errors import ToolError
+from llmflow.runtime.syscall_registry import SyscallRegistry
+from llmflow.runtime.syscalls import register_default_syscalls
+from llmflow.runtime.syscalls.files import FileSyscalls
+from llmflow.runtime.syscalls.git import GitSyscalls
+from llmflow.runtime.syscalls.qlty import QltySyscalls
 
 
 class _StubGitTools:
