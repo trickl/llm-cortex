@@ -34,9 +34,11 @@ from .memory import Memory
 
 
 _JAVA_PLANNING_GUIDANCE = (
-    "When responding you must first synthesize a complete Java plan (public class Plan) "
-    "that conforms to the `define_java_plan` tool specification. Do not execute tools "
-    "directly; emit only Java source for the runtime to execute."
+    "Create Java code to accomplish the user's task, you may only emit Java source code." \
+    "You may only call syscalls that are explicitly allowed. You may comment out function bodies " \
+    "for implementation later if they cannot be defined using an allowed syscall." \
+    "The goal is to draft a plan for execution where details can be defined later, but if " \
+    "it is possible to achieve the functionality using a syscall, you should do so."
 )
 _SYSTEM_PROMPT_TEMPLATE = (
     "{{ base_prompt }}\n\n"

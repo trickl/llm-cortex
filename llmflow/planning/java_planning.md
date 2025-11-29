@@ -9,12 +9,10 @@ The language model must emit *compilable Java source* that describes the full pl
 - Place every helper as a `public` or `private` method inside that class.
 - Include a `public void main()` entrypoint when multiple steps need to be
   orchestrated; emitting only a `main` method is acceptable for simple plans.
-- Java comments are allowed for readability.
-- Do not emit package statements, imports, or prose explanations.
+- Do not emit prose explanations.
 
 ## 2. Method Rules
 
-- Method names must be `camelCase` and describe a single sub-goal.
 - Limit each method body to **7 statements**; prefer additional helpers over long
   methods.
 - Methods may accept and return the following types: `Void`, `String`, `Int`,

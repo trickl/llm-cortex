@@ -27,6 +27,9 @@ hand the parsed structure to your `Agent` initialiser.
 
 Granite/Ollama-specific variant of the same preset. The workflow, tools, and
 environment bindings mirror the OpenAI file, but the `llm` block targets
-`granite4:3b` along with a longer timeout suitable for local inference. The
+`granite4:3b` along with a longer timeout suitable for local inference. When
+running against Granite (or any Ollama model without reliable tool calls), set
+`structured_mode: "json"` in the corresponding `llm_config.yaml` so Instructor
+parses plain JSON instead of expecting OpenAI-style tool invocations. The
 integration test suite references this file so logs and documentation stay in
 sync with the model actually under test.

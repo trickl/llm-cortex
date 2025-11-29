@@ -2,6 +2,7 @@ provider_config:
   provider: "ollama"
   model: "granite4:3b"
   base_url: "http://localhost:11434"
+  structured_mode: "json"
   request_timeout: 180
   options:
     temperature: 0.2

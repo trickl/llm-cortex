@@ -6,6 +6,7 @@ import os
 from typing import Any, Dict, List, Optional
 
 import instructor
+from instructor import Mode
 import yaml
 from pydantic import BaseModel
 
@@ -32,6 +33,7 @@ class LLMClient:
         self.provider = self._build_provider(provider_name, provider_config)
         self.default_request_timeout = provider_config.get("request_timeout")
         self.provider.validate_tool_support()
+        self._structured_mode = self._resolve_structured_mode(provider_config)
         self._structured_client = None
 
     def _load_config(self, file_path: str) -> Dict[str, Any]:
@@ -112,13 +114,19 @@ class LLMClient:
     ) -> BaseModel:
         """Generate a structured response validated by ``response_model``."""
 
-        kwargs.pop("force_tool_call", None)
-        kwargs.setdefault("parallel_tool_calls", False)
+        params = dict(kwargs)
+        params.pop("force_tool_call", None)
+        if self._mode_supports_tool_schemas:
+            params.setdefault("parallel_tool_calls", False)
+        else:
+            params.pop("parallel_tool_calls", None)
+            params.pop("tools", None)
+            params.pop("tool_choice", None)
         client = self._ensure_structured_client()
         return client.create(
             messages=messages,
             response_model=response_model,
-            **kwargs,
+            **params,
         )
 
     def _ensure_structured_client(self):
@@ -134,7 +142,7 @@ class LLMClient:
         kwargs = self._build_structured_kwargs()
         return instructor.from_provider(
             provider_id,
-            mode=instructor.Mode.TOOLS,
+            mode=self._structured_mode,
             **kwargs,
         )
 
@@ -158,3 +166,28 @@ class LLMClient:
         raise RuntimeError(
             f"Structured generation is not supported for provider '{provider}'."
         )
+
+    def _resolve_structured_mode(self, provider_config: Dict[str, Any]) -> Mode:
+        requested = provider_config.get("structured_mode")
+        if isinstance(requested, Mode):
+            return requested
+        if isinstance(requested, str) and requested.strip():
+            normalized = requested.strip().upper().replace("-", "_")
+            try:
+                return Mode[normalized]
+            except KeyError as exc:  # pragma: no cover - defensive
+                raise ValueError(
+                    f"Unsupported structured_mode '{requested}'. Refer to Instructor Mode enum."
+                ) from exc
+        if self.provider_name == "ollama":
+            return Mode.JSON
+        return Mode.TOOLS
+
+    @property
+    def structured_mode(self) -> Mode:
+        return self._structured_mode
+
+    @property
+    def _mode_supports_tool_schemas(self) -> bool:
+        mode = self._structured_mode
+        return mode is Mode.FUNCTIONS or mode.name.endswith("TOOLS")
