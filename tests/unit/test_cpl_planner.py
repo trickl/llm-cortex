@@ -22,15 +22,22 @@ class DummyLLMClient:
 
 
 def test_planner_builds_prompt_and_returns_plan():
-    client = DummyLLMClient(
-        """plan {
-            function main() : Void {
-                syscall.log(\"hello\");
-                return;
+    plan_text = "plan { function main() : Void { syscall.log(\"hello\"); return; } }"
+    response = {
+        "role": "assistant",
+        "content": None,
+        "tool_calls": [
+            {
+                "id": "call-1",
+                "type": "function",
+                "function": {
+                    "name": "define_context_planning_language",
+                    "arguments": json.dumps({"cpl": plan_text}),
+                },
             }
-        }
-        """
-    )
+        ],
+    }
+    client = DummyLLMClient(response)
     planner = CPLPlanner(client, dsl_specification="SPEC CONTENT")
     request = CPLPlanRequest(
         task="Fix the reported lint issue",
@@ -78,9 +85,15 @@ def test_planner_extracts_plan_from_tool_call():
     assert result.metadata.get("planner_notes") == "ok"
 
 
-def test_planner_rejects_invalid_response():
-    client = DummyLLMClient("This is not a plan")
-    planner = CPLPlanner(client, dsl_specification="SPEC")
+def test_planner_requires_tool_call():
+    client = DummyLLMClient(
+        {
+            "role": "assistant",
+            "content": "plan { function main() : Void { return; } }",
+            "tool_calls": None,
+        }
+    )
+    planner = CPLPlanner(client, dsl_specification="SPEC CONTENT")
 
     with pytest.raises(CPLPlanningError):
         planner.generate_plan(CPLPlanRequest(task="Summarize"))

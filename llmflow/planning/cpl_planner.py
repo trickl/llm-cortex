@@ -188,20 +188,17 @@ class CPLPlanner:
         if role != "assistant":
             raise CPLPlanningError(f"Unexpected LLM role '{role}'")
 
-        tool_calls = response.get("tool_calls") or []
+        tool_calls = response.get("tool_calls")
+        if not tool_calls:
+            raise CPLPlanningError(
+                "Planner response must call define_context_planning_language via tool_calls."
+            )
         plan_source, metadata = self._extract_plan_from_tool_calls(tool_calls)
         if plan_source:
             return plan_source, metadata
-
-        content = response.get("content")
-        if not isinstance(content, str):
-            raise CPLPlanningError("LLM response did not contain textual content")
-        plan_source = self._strip_code_fence(content.strip())
-        if not plan_source:
-            raise CPLPlanningError("LLM returned an empty plan")
-        if not plan_source.lstrip().startswith("plan"):
-            raise CPLPlanningError("LLM response did not start with a CPL plan")
-        return plan_source, {}
+        raise CPLPlanningError(
+            "Planner response did not include a valid define_context_planning_language tool payload."
+        )
 
     def _extract_plan_from_tool_calls(
         self, tool_calls: Sequence[Dict[str, Any]]
@@ -218,32 +215,20 @@ class CPLPlanner:
                     f"Planner tool arguments must be a JSON string, received {type(arguments).__name__}."
                 )
             payload = self._safe_json_loads(arguments)
-            cpl_text = (payload.get("cpl") or "").strip()
-            if not cpl_text:
-                raise CPLPlanningError(
-                    f"Planner tool '{_PLANNER_TOOL_NAME}' did not include a 'cpl' field."
-                )
-            metadata: Dict[str, Any] = {}
-            notes = payload.get("notes")
-            if isinstance(notes, str) and notes.strip():
-                metadata["planner_notes"] = notes.strip()
-            return cpl_text, metadata
+            return self._extract_plan_from_payload(payload)
         return None, {}
 
-    @staticmethod
-    def _strip_code_fence(content: str) -> str:
-        if not content.startswith("```"):
-            return content
-        lines = content.splitlines()
-        if len(lines) < 2:
-            return content
-        body: List[str] = []
-        for line in lines[1:]:
-            if line.strip().startswith("```"):
-                break
-            body.append(line)
-        stripped = "\n".join(body).strip()
-        return stripped or content
+    def _extract_plan_from_payload(self, payload: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
+        cpl_text = (payload.get("cpl") or "").strip()
+        if not cpl_text:
+            raise CPLPlanningError(
+                f"Planner tool '{_PLANNER_TOOL_NAME}' did not include a 'cpl' field."
+            )
+        metadata: Dict[str, Any] = {}
+        notes = payload.get("notes")
+        if isinstance(notes, str) and notes.strip():
+            metadata["planner_notes"] = notes.strip()
+        return cpl_text, metadata
 
     @staticmethod
     def _safe_json_loads(payload: str) -> Dict[str, Any]:
