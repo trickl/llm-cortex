@@ -26,7 +26,7 @@ _SAMPLE_PLAN = dedent(
             String lintIssueId = PlanningToolStubs.readTextFile("queries/qlty_llvm-lint_results.md");
 
             // Step 4: Understand the issue details for the parse error on line 7
-            PlanningToolStubs.runUnderstandIssueSubgoal(lintIssueId);
+            PlanningToolStubs.readTextFile("diagnostics/qlty_issue_summary.md");
 
             // Step 5: Apply changes to resolve the parse error
             PlanningToolStubs.applyTextRewrite();

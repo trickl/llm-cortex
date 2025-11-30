@@ -3,15 +3,17 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import textwrap
 import time
 import uuid
+from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 try:  # pragma: no cover - guard against optional dependency changes
     from instructor.core.exceptions import InstructorRetryException
@@ -19,12 +21,36 @@ except ImportError:  # pragma: no cover
     InstructorRetryException = None  # type: ignore[assignment]
 
 from llmflow.llm_client import LLMClient
+from llmflow.logging_utils import LLM_LOGGER_NAME, PLAN_LOGGER_NAME
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 _DEFAULT_SPEC_PATH = _PROJECT_ROOT / "planning" / "java_planning.md"
 _PLANNER_TOOL_NAME = "define_java_plan"
+_STRUCTURED_MAX_RETRIES_ENV = "LLMFLOW_PLANNER_STRUCTURED_MAX_RETRIES"
+def _read_structured_retry_limit() -> Optional[int]:
+    value = os.getenv(_STRUCTURED_MAX_RETRIES_ENV)
+    if not value:
+        return None
+    try:
+        parsed = int(value)
+    except ValueError:
+        logger.warning(
+            "Invalid %s value '%s'; falling back to provider defaults",
+            _STRUCTURED_MAX_RETRIES_ENV,
+            value,
+        )
+        return None
+    if parsed < 0:
+        logger.warning(
+            "%s must be >= 0; falling back to provider defaults",
+            _STRUCTURED_MAX_RETRIES_ENV,
+        )
+        return None
+    return parsed
 
 logger = logging.getLogger(__name__)
+plan_logger = logging.getLogger(PLAN_LOGGER_NAME)
+llm_logger = logging.getLogger(LLM_LOGGER_NAME)
 
 _CLASS_DECL_PATTERN = re.compile(r"^\s*(?:public\s+)?class\s+\w+", re.MULTILINE)
 _CODE_FENCE_PATTERN = re.compile(r"```(?P<lang>[^\n`]*)\n", re.MULTILINE)
@@ -34,6 +60,7 @@ _MARKDOWN_PREFIX_PATTERN = re.compile(
 _LIKELY_JAVA_PREFIX_PATTERN = re.compile(
     r"^(?:package\s+|import\s+|(?:public|protected|private|abstract|final|static)\b|class\s+|interface\s+|enum\s+|record\s+|@|/\*|//|\*)",
 )
+_TOKEN_COUNT_PATTERN = re.compile(r"\S+")
 
 
 def _normalize_java_source(source: str) -> str:
@@ -166,6 +193,339 @@ def _summarize_structured_failure(exc: Exception) -> Optional[str]:
     return None
 
 
+def _serialize_completion_for_logging(completion: Any) -> Optional[str]:
+    if completion is None:
+        return None
+    serializer = getattr(completion, "model_dump_json", None)
+    if callable(serializer):
+        try:
+            return serializer(indent=2)
+        except TypeError:
+            try:
+                return serializer()
+            except Exception:  # pragma: no cover - best effort only
+                pass
+    model_dump = getattr(completion, "model_dump", None)
+    if callable(model_dump):
+        try:
+            dumped = model_dump()
+            return json.dumps(dumped, indent=2, ensure_ascii=False)
+        except Exception:  # pragma: no cover - best effort only
+            pass
+    try:
+        return json.dumps(completion, indent=2, ensure_ascii=False)
+    except TypeError:
+        return str(completion)
+
+
+def _log_structured_failure_details(plan_id: str, exc: Exception) -> None:
+    plan_logger.error(
+        "planner_structured_exception plan_id=%s type=%s message=%s",
+        plan_id,
+        type(exc).__name__,
+        exc,
+    )
+    if InstructorRetryException is None or not isinstance(exc, InstructorRetryException):
+        return
+    attempts = getattr(exc, "failed_attempts", None) or []
+    if not attempts:
+        completion = getattr(exc, "last_completion", None)
+        _log_structured_completion_payload(
+            plan_id=plan_id,
+            attempt_label="last",
+            completion=completion,
+            stage="retry_failure",
+        )
+        return
+    for idx, attempt in enumerate(attempts, start=1):
+        completion = getattr(attempt, "completion", None) or getattr(attempt, "response", None)
+        _log_structured_completion_payload(
+            plan_id=plan_id,
+            attempt_label=str(idx),
+            completion=completion,
+            stage="retry_failure",
+        )
+
+
+def _log_structured_attempt_completion(plan_id: str, attempt: int, completion: Any) -> None:
+    _log_structured_completion_payload(
+        plan_id=plan_id,
+        attempt_label=str(attempt),
+        completion=completion,
+        stage="parse_error",
+    )
+
+
+def _log_structured_completion_payload(
+    *,
+    plan_id: str,
+    attempt_label: str,
+    completion: Any,
+    stage: str,
+) -> None:
+    serialized = _serialize_completion_for_logging(completion)
+    if not serialized:
+        return
+    plan_logger.warning(
+        "planner_structured_payload plan_id=%s attempt=%s stage=%s detail=full_completion_logged_to=agentcortex.llm",
+        plan_id,
+        attempt_label,
+        stage,
+    )
+    llm_logger.error(
+        "planner_structured_payload_dump plan_id=%s attempt=%s stage=%s\n%s",
+        plan_id,
+        attempt_label,
+        stage,
+        serialized,
+    )
+
+    plan_text = _extract_plan_text_from_completion(completion, serialized)
+    if plan_text:
+        plan_logger.info(
+            "planner_structured_plan_body plan_id=%s attempt=%s stage=%s\n%s",
+            plan_id,
+            attempt_label,
+            stage,
+            _format_plan_text(plan_text),
+        )
+
+
+def _extract_plan_text_from_completion(completion: Any, serialized: Optional[str]) -> Optional[str]:
+    candidates: List[Any] = []
+    if completion is not None:
+        model_dump = getattr(completion, "model_dump", None)
+        if callable(model_dump):
+            try:
+                candidates.append(model_dump())
+            except Exception:  # pragma: no cover - best effort
+                pass
+        dict_attr = getattr(completion, "__dict__", None)
+        if isinstance(dict_attr, dict):
+            candidates.append(dict(dict_attr))
+    if serialized:
+        try:
+            candidates.append(json.loads(serialized))
+        except json.JSONDecodeError:
+            pass
+    candidates.append(completion)
+
+    for candidate in candidates:
+        text = _extract_plan_text(candidate)
+        if text:
+            return text
+    return None
+
+
+def _extract_plan_text(payload: Any) -> Optional[str]:
+    if payload is None:
+        return None
+    if isinstance(payload, str):
+        return _parse_plan_content_string(payload)
+    if isinstance(payload, dict):
+        direct = _extract_plan_from_dict(payload)
+        if direct:
+            return direct
+        for key in ("choices", "message", "messages", "delta", "output"):
+            value = payload.get(key)
+            text = _extract_plan_text(value)
+            if text:
+                return text
+        return None
+    if isinstance(payload, Iterable) and not isinstance(payload, (bytes, bytearray)):
+        for item in payload:
+            text = _extract_plan_text(item)
+            if text:
+                return text
+    return None
+
+
+def _extract_plan_from_dict(payload: Dict[str, Any]) -> Optional[str]:
+    for key in ("java", "define_java_plan", "java_code", "code", "source"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            decoded = _decode_plan_string(value)
+            if isinstance(decoded, str) and decoded.strip():
+                return decoded.strip()
+    defines_block = payload.get("defines")
+    if isinstance(defines_block, dict):
+        for candidate in ("java", "java_code", "code", "source"):
+            candidate_value = defines_block.get(candidate)
+            if isinstance(candidate_value, str) and candidate_value.strip():
+                decoded = _decode_plan_string(candidate_value)
+                if isinstance(decoded, str) and decoded.strip():
+                    return decoded.strip()
+    message = payload.get("message")
+    if isinstance(message, dict):
+        content = message.get("content")
+        if isinstance(content, str):
+            parsed = _parse_plan_content_string(content)
+            if parsed:
+                return parsed
+    return None
+
+
+def _decode_plan_string(value: str) -> Any:
+    stripped = value.strip()
+    if not stripped:
+        return ""
+    if stripped.startswith(('{', '[')) or (
+        stripped.startswith('"') and stripped.endswith('"')
+    ):
+        try:
+            return json.loads(stripped)
+        except json.JSONDecodeError:
+            pass
+    if any(seq in stripped for seq in ("\\n", "\\t", "\\r", '\\"')):
+        try:
+            return bytes(stripped, "utf-8").decode("unicode_escape")
+        except Exception:  # pragma: no cover - best effort only
+            return stripped
+    return stripped
+
+
+def _format_plan_text(text: str) -> str:
+    normalized = text.strip()
+    if "\n" in normalized:
+        return normalized
+    tokens = re.split(r"(\{|\}|;)", normalized)
+    indent = 0
+    lines: List[str] = []
+    buffer: List[str] = []
+
+    def flush_buffer() -> None:
+        if buffer:
+            line = "".join(buffer).strip()
+            if line:
+                lines.append((" " * 4 * indent) + line)
+            buffer.clear()
+
+    for token in tokens:
+        if token is None:
+            continue
+        stripped = token.strip()
+        if not stripped:
+            continue
+        if stripped == ";":
+            buffer.append(";")
+            flush_buffer()
+        elif stripped == "{":
+            flush_buffer()
+            lines.append((" " * 4 * indent) + "{")
+            indent += 1
+        elif stripped == "}":
+            flush_buffer()
+            indent = max(indent - 1, 0)
+            lines.append((" " * 4 * indent) + "}")
+        else:
+            if buffer and not buffer[-1].endswith(" "):
+                buffer.append(" ")
+            buffer.append(stripped)
+    flush_buffer()
+    return "\n".join(lines)
+
+
+def _stringify_message_content(content: Any) -> str:
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, (dict, list)):
+        try:
+            return json.dumps(content, ensure_ascii=False, indent=2)
+        except (TypeError, ValueError):
+            return str(content)
+    return str(content)
+
+
+def _estimate_token_count(text: str) -> int:
+    if not text:
+        return 0
+    return len(_TOKEN_COUNT_PATTERN.findall(text))
+
+
+def _current_timestamp_for_llm_log() -> str:
+    return (
+        datetime.now(timezone.utc)
+        .replace(microsecond=0)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
+
+
+def _format_llm_log_block(
+    *,
+    plan_id: str,
+    phase: str,
+    role: str,
+    token_label: str,
+    token_count: Optional[int],
+    content: str,
+) -> str:
+    timestamp = _current_timestamp_for_llm_log()
+    normalized_role = (role or "unknown").title()
+    count_display = str(token_count) if token_count is not None else "n/a"
+    header = (
+        f"[{timestamp}] {phase} - Role {normalized_role} - {token_label} [{count_display}] "
+        f"plan_id={plan_id}"
+    )
+    body = content.rstrip("\n")
+    if not body:
+        body = "(empty)"
+    return f"{header}\n>>>\n{body}\n<<<"
+
+
+def _log_llm_request(plan_id: str, messages: List[Dict[str, Any]], request: JavaPlanRequest) -> None:
+    del request  # unused but kept for parity with future metadata hooks
+    for message in messages:
+        role = str(message.get("role", "unknown"))
+        content = _stringify_message_content(message.get("content"))
+        block = _format_llm_log_block(
+            plan_id=plan_id,
+            phase="Request",
+            role=role,
+            token_label="Input Token Count",
+            token_count=_estimate_token_count(content),
+            content=content,
+        )
+        llm_logger.info(block)
+
+
+def _log_llm_response(plan_id: str, content: str, role: str = "assistant") -> None:
+    block = _format_llm_log_block(
+        plan_id=plan_id,
+        phase="Request",
+        role=role,
+        token_label="Output Token Count",
+        token_count=_estimate_token_count(content),
+        content=content,
+    )
+    llm_logger.info(block)
+
+
+def _parse_plan_content_string(text: str) -> Optional[str]:
+    if not text:
+        return None
+    decoded = _decode_plan_string(text)
+    if isinstance(decoded, dict):
+        plan = _extract_plan_from_dict(decoded)
+        if plan:
+            return plan
+        return None
+    if isinstance(decoded, str):
+        stripped = decoded.strip()
+        if not stripped:
+            return None
+        try:
+            parsed = json.loads(stripped)
+        except json.JSONDecodeError:
+            return stripped
+        if isinstance(parsed, dict):
+            return _extract_plan_from_dict(parsed) or stripped
+        return stripped
+    return None
+
+
 class JavaPlanningError(RuntimeError):
     """Raised when Java plan synthesis fails."""
 
@@ -201,6 +561,24 @@ class JavaPlanResult:
 
 
 class _PlannerToolPayload(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_plain_java(cls, value: Any) -> Any:  # noqa: ANN401 - pydantic hook
+        if isinstance(value, str):
+            return {"java": value}
+        if isinstance(value, dict):
+            java_value = value.get("java")
+            if isinstance(java_value, str) and java_value.strip():
+                return value
+            extracted = _extract_plan_text(value)
+            if extracted:
+                coerced = dict(value)
+                coerced["java"] = extracted
+                return coerced
+        return value
+
     notes: Optional[str] = Field(
         default=None,
         description="Optional commentary about assumptions, risks, or TODOs.",
@@ -239,6 +617,7 @@ class JavaPlanner:
         *,
         specification: Optional[str] = None,
         specification_path: Optional[Path] = None,
+        structured_max_retries: Optional[int] = None,
     ):
         self._llm_client = llm_client
         self._specification = self._load_specification(specification, specification_path)
@@ -247,18 +626,40 @@ class JavaPlanner:
             "type": "function",
             "function": {"name": _PLANNER_TOOL_NAME},
         }
+        self._structured_max_retries = self._resolve_structured_retry_limit(structured_max_retries)
+        
+    def _resolve_structured_retry_limit(self, explicit: Optional[int]) -> int:
+        if explicit is not None:
+            value = explicit
+        else:
+            env_limit = _read_structured_retry_limit()
+            if env_limit is not None:
+                value = env_limit
+            else:
+                provider_limit = (
+                    getattr(self._llm_client.provider, "max_retries", None)
+                    or getattr(self._llm_client.provider, "default_retries", None)
+                )
+                if provider_limit is None or provider_limit <= 0:
+                    value = 2
+                    logger.info(
+                        "Planner structured retries defaulting to %s attempts (provider did not specify)",
+                        value,
+                    )
+                else:
+                    value = provider_limit
+        if value < 0:
+            raise ValueError("structured_max_retries must be >= 0")
+        return value
 
     def generate_plan(self, request: JavaPlanRequest) -> JavaPlanResult:
         messages = self._build_messages(request)
         plan_source: str
         raw_response: Dict[str, Any]
         notes: Optional[str] = None
+        plan_id = str(request.metadata.get("plan_id") or uuid.uuid4())
         request_start = time.perf_counter()
-        retries = (
-            getattr(self._llm_client.provider, "max_retries", None)
-            or getattr(self._llm_client.provider, "default_retries", None)
-            or 0
-        )
+        retries = self._structured_max_retries
         status_prefix = "[JavaPlanner]"
         print(
             f"{status_prefix} Requesting structured Java plan (tools={request.tool_names or ['none']}, retries={retries})",
@@ -270,12 +671,31 @@ class JavaPlanner:
             request.tool_names or ["none"],
             retries,
         )
+        plan_logger.info(
+            "planner_request plan_id=%s tools=%s retries=%s goals=%s context=%s",
+            plan_id,
+            request.tool_names or ["none"],
+            retries,
+            len(request.goals or []),
+            bool(request.context),
+        )
+        _log_llm_request(plan_id, messages, request)
         try:
             payload = self._llm_client.structured_generate(
                 messages=messages,
                 response_model=_PlannerToolPayload,
                 tools=[self._planner_tool_schema],
                 tool_choice=self._planner_tool_choice,
+                max_retries=self._structured_max_retries,
+                log_context={
+                    "logger_name": PLAN_LOGGER_NAME,
+                    "prefix": f"plan_id={plan_id}",
+                    "completion_logger": lambda attempt, completion: _log_structured_attempt_completion(
+                        plan_id,
+                        attempt,
+                        completion,
+                    ),
+                },
             )
         except Exception as exc:  # pragma: no cover - provider dependent
             elapsed = time.perf_counter() - request_start
@@ -289,14 +709,27 @@ class JavaPlanner:
                 elapsed,
                 exc,
             )
+            plan_logger.warning(
+                "planner_structured_failure plan_id=%s elapsed=%.1fs error=%s",
+                plan_id,
+                elapsed,
+                exc,
+            )
+            _log_structured_failure_details(plan_id, exc)
             friendly = _summarize_structured_failure(exc)
             if friendly:
                 logger.warning("%s Falling back to plain-text parsing.", friendly)
+                plan_logger.warning(
+                    "planner_structured_reason plan_id=%s detail=%s",
+                    plan_id,
+                    friendly,
+                )
             else:
                 logger.warning(
                     "Structured Java plan generation failed; attempting plain-text fallback.",
                     exc_info=exc,
                 )
+            plan_logger.info("planner_plain_fallback plan_id=%s", plan_id)
             plan_source, raw_response, notes = self._generate_plain_plan(messages)
         else:
             elapsed = time.perf_counter() - request_start
@@ -310,16 +743,25 @@ class JavaPlanner:
                 elapsed,
                 bool(payload.notes),
             )
+            plan_logger.info(
+                "planner_structured_success plan_id=%s elapsed=%.1fs notes=%s",
+                plan_id,
+                elapsed,
+                bool(payload.notes),
+            )
             plan_source = payload.java.strip()
             raw_response = payload.model_dump()
             if payload.notes:
                 notes = payload.notes.strip()
 
-        plan_id = str(request.metadata.get("plan_id") or uuid.uuid4())
         metadata = dict(request.metadata)
         metadata.setdefault("allowed_tools", sorted(request.tool_names))
+        metadata.setdefault("plan_id", plan_id)
         if notes:
             metadata["planner_notes"] = notes
+
+        plan_logger.info("planner_plan_source plan_id=%s\n%s", plan_id, plan_source)
+        _log_llm_response(plan_id, plan_source)
         return JavaPlanResult(
             plan_id=plan_id,
             plan_source=plan_source,
@@ -376,7 +818,7 @@ class JavaPlanner:
         return normalized, response, None
 
     def _build_messages(self, request: JavaPlanRequest) -> List[Dict[str, Any]]:
-        has_tools = bool(request.tool_names)
+        has_tools = bool(request.tool_stub_source)
         constraint_lines = self._build_constraints(request, has_tools)
         system_content = self._build_system_message(
             request.tool_stub_source,
@@ -400,6 +842,9 @@ class JavaPlanner:
             " calling that tool exactly once when your model supports tool calls."
             " If tools are unavailable, respond with the raw Java source only and do not"
             " emit explanations."
+            " Every planning tool invocation must be written as a static call on"
+            " PlanningToolStubs.<toolName>(...). Never reference bare tool names or invent"
+            " alternate helper classes."
         )
         schema_guidance = textwrap.dedent(
             """
@@ -467,14 +912,6 @@ class JavaPlanner:
             lines.append("Context:")
             lines.append(textwrap.dedent(request.context).strip())
             lines.append("")
-
-        lines.append("Available planning tools:")
-        tool_entries = _summarize_tools(request.tool_schemas, request.tool_names)
-        if tool_entries:
-            lines.extend(tool_entries)
-        else:
-            lines.append("- (none registered)")
-        lines.append("")
 
         if request.tool_stub_class_name:
             lines.append(
@@ -571,31 +1008,6 @@ class JavaPlanner:
                 },
             },
         }
-
-
-def _summarize_tools(
-    tool_schemas: Sequence[Dict[str, Any]],
-    fallback_names: Sequence[str],
-) -> List[str]:
-    entries: List[str] = []
-    seen_names: set[str] = set()
-    for schema in tool_schemas:
-        if not isinstance(schema, dict):
-            continue
-        function_meta = schema.get("function") or {}
-        name = function_meta.get("name")
-        if not name or name in seen_names:
-            continue
-        description = function_meta.get("description") or "No description provided."
-        entries.append(f"- {name}: {description}".strip())
-        seen_names.add(name)
-    if entries:
-        return entries
-    deduped_names = []
-    for name in fallback_names:
-        if name and name not in deduped_names:
-            deduped_names.append(name)
-    return [f"- {name}" for name in deduped_names]
 
 
 __all__ = [

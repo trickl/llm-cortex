@@ -44,7 +44,9 @@ from .memory import Memory
 
 _JAVA_PLANNING_GUIDANCE = (
     "Create Java code to accomplish the user's task and emit only Java source."\
-    "Use the provided PlanningToolStubs class to invoke the registered planning tools."\
+    "Use the provided PlanningToolStubs class to invoke the registered planning tools by calling "\
+    "PlanningToolStubs.<toolName>(...) exactly as shown in the stub source; never call raw tool "\
+    "functions directly."\
     "Comment out helper bodies when a step cannot yet be implemented, but prefer concrete tool "\
     "calls whenever a registered tool can perform the work."
 )

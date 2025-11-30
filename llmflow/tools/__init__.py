@@ -49,7 +49,6 @@ _TOOL_MODULES: Iterable[str] = (
 	"tool_scientific_papers_search_arxiv",
 	"tool_download_pdf_from_url",
 	"tool_text_search",
-	"tool_subgoal",
 )
 
 _LOADED_MODULES: Set[str] = set()

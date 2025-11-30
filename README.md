@@ -259,6 +259,10 @@ from llmflow.planning import JavaPlanRequest, JavaPlanner
 llm = LLMClient()
 planner = JavaPlanner(llm)
 
+# Adjust structured retries (defaults to provider setting or 2 attempts) by
+# exporting the environment variable below or passing structured_max_retries.
+# export LLMFLOW_PLANNER_STRUCTURED_MAX_RETRIES=2
+
 plan = planner.generate_plan(
 	JavaPlanRequest(
 		task="Triage the failing lint issue",
@@ -272,6 +276,12 @@ print(plan.plan_source)
 
 Later steps feed this plan into the Java runtime so the agent can execute the
 synthesized workflow end-to-end.
+
+> ℹ️ **Planner retries** – Structured plan generation honors
+> `LLMFLOW_PLANNER_STRUCTURED_MAX_RETRIES` when set. Otherwise it defers to the
+> provider's retry budget (falling back to two attempts when unspecified). Set
+> the variable to `0` to disable retries entirely or to any positive integer to
+> control how many Instructor attempts run before the plan is surfaced.
 
 ### 🔁 Java Plan Retry & Telemetry
 

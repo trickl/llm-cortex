@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import instructor
 from instructor import Mode
@@ -112,6 +113,7 @@ class LLMClient:
         *,
         messages: List[Dict[str, Any]],
         response_model: Any,
+        log_context: Optional[Dict[str, Any]] = None,
         **kwargs: Any,
     ) -> BaseModel:
         """Generate a structured response validated by ``response_model``."""
@@ -125,7 +127,7 @@ class LLMClient:
             params.pop("tools", None)
             params.pop("tool_choice", None)
         existing_hooks = params.pop("hooks", None)
-        hooks = self._build_structured_logging_hooks(existing_hooks)
+        hooks = self._build_structured_logging_hooks(existing_hooks, log_context)
         client = self._ensure_structured_client()
         return client.create(
             messages=messages,
@@ -151,14 +153,29 @@ class LLMClient:
             **kwargs,
         )
 
-    def _build_structured_logging_hooks(self, existing: Optional[Hooks] = None) -> Hooks:
+    def _build_structured_logging_hooks(
+        self,
+        existing: Optional[Hooks] = None,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> Hooks:
         hooks = Hooks()
-        state: Dict[str, Any] = {"attempt": 0, "start": None}
+        state: Dict[str, Any] = {"attempt": 0, "start": None, "last_completion": None}
+        context = context or {}
+        context_logger_name = context.get("logger_name")
+        context_prefix = str(context.get("prefix", "")).strip()
+        context_logger = logging.getLogger(context_logger_name) if context_logger_name else None
+        completion_logger: Optional[Callable[[int, Any], None]] = context.get("completion_logger")
 
         def _log(message: str) -> None:
             prefix = "[Instructor][structured]"
             provider = self.provider_name or "unknown"
-            print(f"{prefix} {message} (provider={provider}, mode={self._structured_mode.name})", flush=True)
+            formatted = f"{prefix} {message} (provider={provider}, mode={self._structured_mode.name})"
+            print(formatted, flush=True)
+            if context_logger:
+                if context_prefix:
+                    context_logger.info("%s %s", context_prefix, message)
+                else:
+                    context_logger.info(message)
 
         def _elapsed() -> Optional[float]:
             start = state.get("start")
@@ -175,11 +192,13 @@ class LLMClient:
         def on_kwargs(*args: Any, **request_kwargs: Any) -> None:
             state["attempt"] = state.get("attempt", 0) + 1
             state["start"] = time.perf_counter()
+            state["last_completion"] = None
             model = request_kwargs.get("model") or self.model
             _log(f"Attempt {state['attempt']} started for model={model}")
 
         def on_response(response: Any) -> None:  # noqa: ANN401
             elapsed = _elapsed()
+            state["last_completion"] = response
             if elapsed is not None:
                 _log(f"Attempt {state['attempt']} received completion in {elapsed:.1f}s")
             else:
@@ -192,6 +211,16 @@ class LLMClient:
                 _log(f"Attempt {state['attempt']} parse error after {elapsed:.1f}s: {detail}")
             else:
                 _log(f"Attempt {state['attempt']} parse error: {detail}")
+            if completion_logger and state.get("last_completion") is not None:
+                try:
+                    completion_logger(state["attempt"], state["last_completion"])
+                except Exception as exc:  # pragma: no cover - logging should not fail
+                    logging.getLogger(context_logger_name or __name__).warning(
+                        "Structured completion logger failed: %s",
+                        exc,
+                    )
+                finally:
+                    state["last_completion"] = None
 
         def on_completion_error(error: Exception) -> None:
             elapsed = _elapsed()
