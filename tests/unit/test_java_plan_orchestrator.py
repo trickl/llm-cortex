@@ -7,6 +7,7 @@ from llmflow.planning import (
     CompilationError,
     JavaPlanRequest,
     JavaCompilationResult,
+    PlanFixerResult,
     PlanOrchestrator,
 )
 
@@ -18,6 +19,7 @@ class StubPlanResult:
     metadata: Dict[str, str]
     raw_response: Dict[str, str]
     prompt_messages: List[Dict[str, str]]
+    prompt_hash: str = "stub-hash"
 
 
 class DummyPlanner:
@@ -36,6 +38,7 @@ class DummyPlanner:
             metadata={},
             raw_response={},
             prompt_messages=[],
+            prompt_hash=f"hash-{len(self.requests)}",
         )
 
 
@@ -76,6 +79,28 @@ class DummyCompiler:
         return self._results.pop(0)
 
 
+class DummyFixer:
+    def __init__(self, plans: List[str]):
+        self._plans = list(plans)
+        self.calls: List[Dict[str, object]] = []
+
+    def fix_plan(self, request, *, attempt):
+        if not self._plans:
+            raise RuntimeError("No more fixer plans queued")
+        plan_source = self._plans.pop(0)
+        result = PlanFixerResult(
+            plan_source=plan_source,
+            compile_result=JavaCompilationResult(
+                success=False,
+                command=("javac",),
+                stdout="",
+                stderr="",
+            ),
+        )
+        self.calls.append({"request": request, "attempt": attempt, "result": result})
+        return result
+
+
 def _compile_success() -> JavaCompilationResult:
     return JavaCompilationResult(success=True, command=("javac",), stdout="", stderr="")
 
@@ -88,6 +113,50 @@ def _compile_failure(message: str) -> JavaCompilationResult:
         stderr=message,
         errors=[CompilationError(message=message, file="Plan.java", line=3, column=5)],
     )
+
+
+def test_compile_failures_trigger_new_attempt_without_inline_replan(runner_factory):
+    planner = DummyPlanner([
+        """
+        public class Plan {
+            public void main() { PlanningToolStubs.doA(); }
+        }
+        """,
+        """
+        public class Plan {
+            public void main() { PlanningToolStubs.doB(); }
+        }
+        """,
+    ])
+    runner, make_runner = runner_factory([
+        {"success": True, "errors": [], "metadata": {}},
+    ])
+    compiler = DummyCompiler([
+        _compile_failure("missing symbol"),
+        _compile_failure("still missing"),
+        _compile_success(),
+    ])
+    fixer = DummyFixer([
+        "public class Plan { void main() { /* fix 1 */ } }",
+        "public class Plan { void main() { /* fix 2 */ } }",
+    ])
+    orchestrator = PlanOrchestrator(
+        planner,
+        make_runner,
+        max_retries=1,
+        max_compile_refinements=2,
+        plan_compiler=compiler,
+        plan_fixer=fixer,
+        plan_fixer_max_attempts=2,
+    )
+    request = JavaPlanRequest(task="Do thing", goals=["goal"])
+
+    result = orchestrator.execute_with_retries(request)
+
+    assert result["success"] is True
+    assert len(planner.requests) == 2, "Planner should only be invoked once per orchestrator attempt"
+    assert planner.requests[1].prior_plan_source is None
+    assert planner.requests[1].metadata.get("attempt_index") == 2
 
 
 def test_orchestrator_succeeds_without_retries(runner_factory):
@@ -192,7 +261,7 @@ def test_telemetry_includes_tool_usage(runner_factory):
     assert "cloneRepo" in result["summary"]
 
 
-def test_compile_failure_triggers_refinement(runner_factory):
+def test_compile_failure_returns_failure_without_inline_replan(runner_factory):
     planner = DummyPlanner([
         """
         public class Plan {
@@ -227,13 +296,10 @@ def test_compile_failure_triggers_refinement(runner_factory):
 
     result = orchestrator.execute_with_retries(request)
 
-    assert result["success"] is True
-    assert len(planner.requests) == 2, "Planner should be invoked for refinement"
-    refine_request = planner.requests[1]
-    assert "cannot find symbol" in refine_request.compile_error_report
-    assert refine_request.prior_plan_source is not None
+    assert result["success"] is False
+    assert len(planner.requests) == 1, "No inline replanning should occur without fixer support"
     attempt = result["attempts"][0]
-    assert len(attempt["compile_attempts"]) == 2
+    assert len(attempt["compile_attempts"]) == 1
     assert attempt["compile_attempts"][0]["success"] is False
 
 
@@ -276,3 +342,145 @@ def test_compile_failure_aborts_when_limit_reached(runner_factory):
     assert runner.calls == []
     errors = result["attempts"][0]["execution"]["errors"]
     assert errors and errors[0]["type"] == "compile_error"
+
+
+def test_plan_fixer_handles_compile_errors_without_replan(runner_factory):
+    planner = DummyPlanner([
+        """
+        public class Plan {
+            public void main() {
+                PlanningToolStubs.log("bad");
+            }
+        }
+        """,
+    ])
+    runner, make_runner = runner_factory([
+        {"success": True, "errors": [], "metadata": {}},
+    ])
+    compiler = DummyCompiler([
+        _compile_failure("missing Map"),
+        _compile_success(),
+    ])
+    fixer = DummyFixer([
+        """
+        public class Plan {
+            public void main() {
+                PlanningToolStubs.log("fixed");
+            }
+        }
+        """,
+    ])
+    orchestrator = PlanOrchestrator(
+        planner,
+        make_runner,
+        max_retries=0,
+        plan_compiler=compiler,
+        plan_fixer=fixer,
+    )
+    request = JavaPlanRequest(task="Fix", goals=["goal"], tool_stub_class_name="PlanningToolStubs")
+
+    result = orchestrator.execute_with_retries(request)
+
+    assert result["success"] is True
+    assert len(planner.requests) == 1, "Plan should not be regenerated when fixer succeeds"
+    assert len(compiler.calls) == 2
+    assert len(fixer.calls) == 1
+
+
+def test_plan_fixer_stops_when_errors_increase(runner_factory):
+    planner = DummyPlanner([
+        """
+        public class Plan {
+            public void main() {
+                PlanningToolStubs.log("bad");
+            }
+        }
+        """,
+        """
+        public class Plan {
+            public void main() {
+                PlanningToolStubs.log("replanned");
+            }
+        }
+        """,
+    ])
+    runner, make_runner = runner_factory([
+        {"success": True, "errors": [], "metadata": {}},
+    ])
+    compiler = DummyCompiler([
+        _compile_failure("missing Map"),
+        JavaCompilationResult(
+            success=False,
+            command=("javac",),
+            stdout="",
+            stderr="still missing",
+            errors=[
+                CompilationError(message="still missing", file="Plan.java", line=4, column=3),
+                CompilationError(message="secondary", file="Plan.java", line=5, column=1),
+            ],
+        ),
+        _compile_success(),
+    ])
+    fixer = DummyFixer([
+        """
+        public class Plan {
+            public void main() {
+                PlanningToolStubs.log("attempt fix");
+            }
+        }
+        """,
+    ])
+    orchestrator = PlanOrchestrator(
+        planner,
+        make_runner,
+        max_retries=0,
+        plan_compiler=compiler,
+        plan_fixer=fixer,
+        max_compile_refinements=3,
+    )
+    request = JavaPlanRequest(task="Fix", goals=["goal"], tool_stub_class_name="PlanningToolStubs")
+
+    result = orchestrator.execute_with_retries(request)
+
+    assert result["success"] is False
+    assert len(planner.requests) == 1, "Failed compile refinements should end the attempt"
+    assert len(fixer.calls) == 1
+    assert compiler.calls[0]["plan_source"].strip().startswith("public class Plan")
+
+
+def test_initial_plan_artifacts_written(tmp_path, runner_factory):
+    planner = DummyPlanner([
+        """
+        public class Plan {
+            public void main() {
+                PlanningToolStubs.log("hello");
+            }
+        }
+        """,
+    ])
+    runner, make_runner = runner_factory([
+        {"success": True, "errors": [], "metadata": {}},
+    ])
+    compiler = DummyCompiler([_compile_success()])
+    orchestrator = PlanOrchestrator(
+        planner,
+        make_runner,
+        plan_compiler=compiler,
+        plan_artifact_root=tmp_path / "artifacts",
+    )
+    request = JavaPlanRequest(
+        task="Persist plan",
+        goals=["goal"],
+        tool_stub_source="public final class PlanningToolStubs {}",
+        tool_stub_class_name="PlanningToolStubs",
+    )
+
+    result = orchestrator.execute_with_retries(request)
+
+    plan = result["final_plan"]
+    base_dir = tmp_path / "artifacts" / plan.prompt_hash / "1"
+    plan_path = base_dir / "Plan.java"
+    stub_path = base_dir / "PlanningToolStubs.java"
+    assert plan_path.exists()
+    assert stub_path.exists()
+    assert "PlanningToolStubs" in stub_path.read_text(encoding="utf-8")

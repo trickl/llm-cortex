@@ -15,7 +15,7 @@ from llmflow.planning import JavaPlanner, JavaPlanRequest
 pytestmark = pytest.mark.include_integration_test
 
 _TEST_CONFIG_PATH = Path(__file__).with_name("ollama_llm_config.yaml")
-_REQUIRED_MODEL = "granite4:3b"
+_REQUIRED_MODEL = "qwen2.5-coder:7b"
 _OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 _FORCE_GRANITE_TESTS = os.getenv("LLMFLOW_FORCE_GRANITE_TESTS", "").lower() in {
     "1",
@@ -161,7 +161,7 @@ _COMPLEXITY_SCENARIOS = [
 @pytest.mark.skipif(
     not _GRANITE_AVAILABLE and not _FORCE_GRANITE_TESTS,
     reason=(
-        "Requires a running Ollama server with the granite4:3b model pulled. "
+        "Requires a running Ollama server with the qwen2.5-coder:7b model pulled. "
         "Set OLLAMA_BASE_URL if the server is not on localhost."
     ),
 )

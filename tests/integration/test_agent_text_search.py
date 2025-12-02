@@ -15,7 +15,7 @@ from llmflow.tools import tool_text_search
 pytestmark = pytest.mark.include_integration_test
 
 _TEST_CONFIG_PATH = Path(__file__).with_name("ollama_llm_config.yaml")
-_REQUIRED_MODEL = "granite4:3b"
+_REQUIRED_MODEL = "qwen2.5-coder:7b"
 _OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 
 
@@ -58,7 +58,7 @@ def isolated_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 @pytest.mark.skipif(
     not _OLLAMA_AVAILABLE,
     reason=(
-        "Requires a running Ollama server with the granite4:3b model pulled. "
+        "Requires a running Ollama server with the qwen2.5-coder:7b model pulled. "
         "Set OLLAMA_BASE_URL if the server is not on localhost."
     ),
 )

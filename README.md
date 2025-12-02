@@ -340,9 +340,10 @@ pipeline:
    subsequent turns can reason about successes or blockers.
 
 Agents expose a `plan_max_retries` parameter (CLI/config key
-`plan_max_retries`) that caps orchestrator attempts per user turn. Setting it to
-0 disables retries, while higher values enable the planner to repair invalid or
-failing programs automatically. The orchestrator also accepts
+`plan_max_retries`) that caps orchestrator attempts per user turn. It now
+defaults to `0`, leaving retry logic to Instructor's structured parsing loop.
+Only raise it when you explicitly want the orchestrator to request entirely new
+plans after Instructor has already exhausted its own retries. The orchestrator also accepts
 `max_compile_refinements` (default `3`) to control how many times compiler
 errors are fed back to the planner before giving up. Because the legacy
 `agent_execution` and

@@ -56,8 +56,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--model",
-        default="granite4:3b",
-        help="Ollama model to probe (default: granite4:3b)",
+        default="qwen2.5-coder:7b",
+        help="Ollama model to probe (default: qwen2.5-coder:7b)",
     )
     parser.add_argument(
         "--prompt",

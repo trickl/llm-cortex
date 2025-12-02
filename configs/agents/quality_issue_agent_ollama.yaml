@@ -7,13 +7,14 @@ agent:
     reported quality problems.
   llm:
     provider: ollama
-    model: granite4:3b
+    model: qwen2.5-coder:7b
     base_url: "${OLLAMA_BASE_URL:-http://localhost:11434}"
     request_timeout: 180
     temperature: 0.2
     max_output_tokens: 1500
+    require_tool_support: false
   workflow:
-    plan_max_retries: 15
+    plan_max_retries: 0
     reflect_every_n_steps: 5
     allow_parallel_tools: false
   base_context:

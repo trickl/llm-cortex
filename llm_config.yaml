@@ -3,6 +3,7 @@ provider_config:
   api_key: "YOUR_OPENAI_API_KEY"  # Set your API key in environment variables
   model: "gpt-4o-mini"
   structured_mode: "tools"  # Optional; defaults to TOOLS for OpenAI
+  require_tool_support: true  # Set to false only if no tool calls are ever needed
 
 # Example for GenericProvider configuration:
 # provider_config:
@@ -28,6 +29,7 @@ provider_config:
 #   model: "llama3.1"   # Or any model you have pulled via `ollama pull`
 #   base_url: "http://localhost:11434"  # Optional if using the default
 #   structured_mode: "json"  # Recommended for models without reliable tool calls
+#   require_tool_support: false  # Skip tool probing for completion-only models
 #   options:
 #     temperature: 0.4
 #     num_ctx: 8192

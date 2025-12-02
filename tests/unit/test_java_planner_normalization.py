@@ -50,3 +50,19 @@ def test_normalize_trims_markdown_prefix_without_code_fence() -> None:
 
     assert normalized.startswith("public class SoloPlan")
     assert "Steps to follow" not in normalized
+
+
+def test_normalize_decodes_escaped_newlines() -> None:
+    raw = (
+        "public class Planner {\\n"
+        "    public static void main(String[] args) throws Exception {\\n"
+        "        System.out.println(\"hi\");\\n"
+        "    }\\n"
+        "}"
+    )
+
+    normalized = _normalize_java_source(raw)
+
+    assert normalized.startswith("public class Planner")
+    assert normalized.splitlines()[0] == "public class Planner {"
+    assert len(normalized.splitlines()) > 1

@@ -6,6 +6,7 @@ from .java_plan_compiler import (
     JavaCompilationResult,
     JavaPlanCompiler,
 )
+from .java_plan_fixer import JavaPlanFixer, PlanFixerRequest, PlanFixerResult
 from .java_planner import (
     JavaPlanRequest,
     JavaPlanResult,
@@ -20,10 +21,13 @@ __all__ = [
     "JavaCompilationError",
     "JavaCompilationResult",
     "JavaPlanCompiler",
+    "JavaPlanFixer",
     "JavaPlanRequest",
     "JavaPlanResult",
     "JavaPlanner",
     "JavaPlanningError",
+    "PlanFixerRequest",
+    "PlanFixerResult",
     "PlanOrchestrator",
     "generate_tool_stub_class",
     "ToolStubGenerationError",

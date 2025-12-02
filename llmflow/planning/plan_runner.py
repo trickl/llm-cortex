@@ -1,8 +1,8 @@
 """Static analysis entry points for Java plan programs."""
 from __future__ import annotations
 
+import logging
 import re
-from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import javalang
@@ -11,8 +11,18 @@ from .java_plan_analysis import JavaPlanGraph, analyze_java_plan
 from .java_planner import JavaPlanningError
 
 
-_PROJECT_ROOT = Path(__file__).resolve().parents[1]
-_DEFAULT_SPEC_PATH = _PROJECT_ROOT / "planning" / "java_planning.md"
+_EMBEDDED_SPEC = (
+    "You coordinate goal-driven Java automation. Return exactly one top-level class named Planner "
+    "that calls PlanningToolStubs helpers to perform every side effect. Prefer helper decomposition, "
+    "avoid markdown, and emit compilable Java source."
+)
+_EMBEDDED_SPEC = (
+    "You coordinate goal-driven Java automation. Return exactly one top-level class named Planner "
+    "that calls PlanningToolStubs helpers to perform every side effect. Prefer helper decomposition, "
+    "avoid markdown, and emit compilable Java source."
+)
+
+logger = logging.getLogger(__name__)
 
 
 class PlanRunner:
@@ -86,12 +96,8 @@ class PlanRunner:
 
     @staticmethod
     def _load_specification() -> str:
-        try:
-            return _DEFAULT_SPEC_PATH.read_text(encoding="utf-8")
-        except OSError as exc:  # pragma: no cover - depends on filesystem
-            raise JavaPlanningError(
-                f"Unable to load plan specification from '{_DEFAULT_SPEC_PATH}'."
-            ) from exc
+        logger.info("PlanRunner specification not provided; using embedded guidance.")
+        return _EMBEDDED_SPEC
 
 
 _LINE_PATTERN = re.compile(r"line\s+(?P<line>\d+)", re.IGNORECASE)

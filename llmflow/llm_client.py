@@ -35,7 +35,9 @@ class LLMClient:
         self.provider_config = dict(provider_config)
         self.provider = self._build_provider(provider_name, provider_config)
         self.default_request_timeout = provider_config.get("request_timeout")
-        self.provider.validate_tool_support()
+        self._require_tool_support = provider_config.get("require_tool_support", True)
+        if self._require_tool_support:
+            self.provider.validate_tool_support()
         self._structured_mode = self._resolve_structured_mode(provider_config)
         self._structured_client = None
 

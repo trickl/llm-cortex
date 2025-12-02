@@ -23,6 +23,7 @@ from llmflow.llm_client import LLMClient
 from llmflow.logging_utils import RunArtifactManager, RunLogContext
 from llmflow.planning import (
     JavaPlanner,
+    JavaPlanFixer,
     JavaPlanRequest,
     PlanOrchestrator,
     ToolStubGenerationError,
@@ -43,12 +44,31 @@ from .memory import Memory
 
 
 _JAVA_PLANNING_GUIDANCE = (
-    "Create Java code to accomplish the user's task and emit only Java source."\
-    "Use the provided PlanningToolStubs class to invoke the registered planning tools by calling "\
-    "PlanningToolStubs.<toolName>(...) exactly as shown in the stub source; never call raw tool "\
-    "functions directly."\
-    "Comment out helper bodies when a step cannot yet be implemented, but prefer concrete tool "\
-    "calls whenever a registered tool can perform the work."
+    "Create formatted Java code to accomplish the user's task and emit only Java source."
+    "Use the provided PlanningToolStubs class to invoke the registered planning tools by calling "
+    "PlanningToolStubs.<toolName>(...) exactly as shown in the stub source; never call raw tool "
+    "functions directly."
+    "Comment out helper bodies when a step cannot yet be implemented, but prefer concrete tool "
+    "calls whenever a registered tool can perform the work.\n\n"
+    "Example Planner:\n"
+    "```java\n"
+    "public class Planner {\n"
+    "    public static void main(String[] args) throws Exception {\n"
+    "        Map<String, Object> issue = PlanningToolStubs.qlty_get_first_issue();\n"
+    "        if (issue == null) {\n"
+    "            System.out.println(\"No lint issues remaining.\");\n"
+    "            return;\n"
+    "        }\n"
+    "        PlanningToolStubs.git_create_branch(\"fix/issue-\" + issue.get(\"slug\"));\n"
+    "        inspectIssue(issue);\n"
+    "    }\n\n"
+    "    private static void inspectIssue(Map<String, Object> issue) throws Exception {\n"
+    "        String path = (String) issue.get(\"path\");\n"
+    "        PlanningToolStubs.read_file(path);\n"
+    "        // TODO: add concrete fixes using other PlanningToolStubs helpers.\n"
+    "    }\n"
+    "}\n"
+    "```"
 )
 _SYSTEM_PROMPT_TEMPLATE = (
     "{{ base_prompt }}\n\n"
@@ -80,7 +100,8 @@ class Agent(AgentInstrumentationMixin):
         allowed_tools: Optional[Sequence[str]] = None,
         runner_factory: Optional[Callable[[], PlanRunner]] = None,
         planner: Optional[JavaPlanner] = None,
-        plan_max_retries: int = 1,
+        plan_fixer: Optional[JavaPlanFixer] = None,
+        plan_max_retries: int = 0,
         capture_trace: bool = False,
         verbose: bool = True,
         enable_run_logging: bool = True,
@@ -100,6 +121,7 @@ class Agent(AgentInstrumentationMixin):
         self._capture_trace = capture_trace
         self.plan_max_retries = max(plan_max_retries, 0)
         self._planner = planner or JavaPlanner(llm_client)
+        self._plan_fixer = plan_fixer or JavaPlanFixer(llm_client)
         if runner_factory is not None:
             self._runner_factory = runner_factory
         else:
@@ -108,6 +130,7 @@ class Agent(AgentInstrumentationMixin):
             self._planner,
             self._runner_factory,
             max_retries=self.plan_max_retries,
+            plan_fixer=self._plan_fixer,
         )
 
         available_tool_names = self._discover_tool_names(

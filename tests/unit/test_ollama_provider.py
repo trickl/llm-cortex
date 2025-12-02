@@ -7,7 +7,7 @@ class DummyOllamaProvider(OllamaProvider):
     """Subclass that skips network validation for unit tests."""
 
     def __init__(self):
-        super().__init__(model_name="granite4:3b")
+        super().__init__(model_name="qwen2.5-coder:7b")
 
     def validate_tool_support(self) -> None:  # pragma: no cover - unused in test
         return

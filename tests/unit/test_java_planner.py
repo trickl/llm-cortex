@@ -1,6 +1,7 @@
 import io
 import json
 import logging
+from typing import Any, Dict, List
 from unittest.mock import MagicMock
 
 import pytest
@@ -49,6 +50,23 @@ class FailingLLMClient:
         raise self.exception
 
     def generate(self, **kwargs):
+        return {"content": self.fallback_plan}
+
+
+class PlainFallbackRetryClient:
+    def __init__(self, exception, fallback_plan=JAVA_PLAN):
+        self.exception = exception
+        self.fallback_plan = fallback_plan
+        self.provider = type("Provider", (), {"max_retries": 1})()
+        self.generate_calls: List[List[Dict[str, Any]]] = []
+
+    def structured_generate(self, **kwargs):
+        raise self.exception
+
+    def generate(self, *, messages, **kwargs):
+        self.generate_calls.append(messages)
+        if len(self.generate_calls) == 1:
+            return {"content": ""}
         return {"content": self.fallback_plan}
 
 
@@ -358,6 +376,55 @@ def test_planner_env_var_controls_retry(monkeypatch):
     planner.generate_plan(JavaPlanRequest(task="Do work"))
 
     assert client.kwargs.get("max_retries") == 5
+
+
+def test_planner_payload_renders_ast_structure():
+    from llmflow.planning import java_planner as jp
+
+    payload = {
+        "name": "Planner",
+        "imports": ["java.util.Map"],
+        "main": {
+            "statements": ["PlanningToolStubs.read_file(\"README.md\");"],
+        },
+    }
+
+    model = jp._PlannerToolPayload(**payload)
+
+    assert "public class Planner" in model.java
+    assert "PlanningToolStubs.read_file" in model.java
+
+
+def test_planner_payload_handles_json_wrapped_ast_string():
+    from llmflow.planning import java_planner as jp
+
+    ast_payload = {
+        "name": "Planner",
+        "main": {
+            "statements": ["PlanningToolStubs.log(\"ok\");"],
+        },
+    }
+    wrapped = json.dumps({"notes": None, "java": json.dumps(ast_payload)})
+
+    model = jp._PlannerToolPayload(**{"java": wrapped})
+
+    assert "public class Planner" in model.java
+    assert "PlanningToolStubs.log" in model.java
+
+
+def test_plain_fallback_sends_retry_prompt():
+    exception = RuntimeError("Missing field 'java'")
+    client = PlainFallbackRetryClient(exception)
+    planner = JavaPlanner(client, specification="SPEC CONTENT")
+
+    result = planner.generate_plan(JavaPlanRequest(task="Handle retries"))
+
+    assert result.plan_source == JAVA_PLAN
+    assert len(client.generate_calls) == 2
+    first_followup = client.generate_calls[0][-1]["content"]
+    second_followup = client.generate_calls[1][-1]["content"]
+    assert "Structured tool calls failed" in first_followup
+    assert "Your prior response was empty or malformed" in second_followup
 
 
 def test_planner_logs_llm_request_payload(monkeypatch):

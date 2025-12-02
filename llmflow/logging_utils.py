@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 from uuid import uuid4
 
 LLM_LOGGER_NAME = "agentcortex.llm"
@@ -173,3 +173,47 @@ def summarize_response(response: Dict[str, object], limit: int = 120) -> str:
         return "(empty response)"
     content = content.replace("\n", " ")
     return content[:limit] + ("…" if len(content) > limit else "")
+
+
+def log_plan_failure_summary(
+    *,
+    attempt_number: int,
+    plan_id: Optional[str],
+    reason: str,
+    metadata: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Emit a concise plan failure summary to the plan logger."""
+
+    logger = logging.getLogger(PLAN_LOGGER_NAME)
+    payload = {
+        "attempt": attempt_number,
+        "plan_id": plan_id,
+        "reason": reason,
+        "metadata": metadata or {},
+    }
+    logger.warning(
+        "plan_failure_summary attempt=%s plan_id=%s reason=%s metadata=%s",
+        attempt_number,
+        plan_id,
+        reason,
+        metadata or {},
+    )
+
+
+def format_execution_failure_reason(execution_result: Dict[str, Any]) -> str:
+    """Return a human-readable reason for an execution failure."""
+
+    if not isinstance(execution_result, dict):
+        return "Execution failed for an unknown reason."
+    metadata = execution_result.get("metadata") or {}
+    stage = metadata.get("stage")
+    errors = execution_result.get("errors") or []
+    if stage == "compile":
+        first = errors[0] if errors else {}
+        return f"Compilation failed: {first.get('message') or 'See errors for details.'}"
+    if errors:
+        first = errors[0]
+        error_type = first.get("type") or "execution_error"
+        message = first.get("message") or "No error message provided."
+        return f"{error_type}: {message}"
+    return metadata.get("reason") or "Execution failed without structured errors."

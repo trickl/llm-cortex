@@ -16,7 +16,7 @@ from llmflow.tools import get_module_for_tool_name, load_tool_module
 pytestmark = pytest.mark.include_integration_test
 
 _TEST_CONFIG_PATH = Path(__file__).with_name("ollama_llm_config.yaml")
-_REQUIRED_MODEL = "granite4:3b"
+_REQUIRED_MODEL = "qwen2.5-coder:7b"
 _OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 _QUALITY_AGENT_CONFIG = (
     Path(__file__).resolve().parents[2]
@@ -56,7 +56,7 @@ _OLLAMA_AVAILABLE = _TEST_CONFIG_PATH.exists() and _ollama_ready()
 @pytest.mark.skipif(
     not _OLLAMA_AVAILABLE,
     reason=(
-        "Requires a running Ollama server with the granite4:3b model pulled. "
+        "Requires a running Ollama server with the qwen2.5-coder:7b model pulled. "
         "Set OLLAMA_BASE_URL if the server is not on localhost."
     ),
 )

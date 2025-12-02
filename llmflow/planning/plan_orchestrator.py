@@ -3,12 +3,23 @@ from __future__ import annotations
 
 import logging
 from dataclasses import replace
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
-from llmflow.logging_utils import PLAN_LOGGER_NAME
+from llmflow.logging_utils import (
+    PLAN_LOGGER_NAME,
+    format_execution_failure_reason,
+    log_plan_failure_summary,
+)
 
-from .java_plan_compiler import JavaPlanCompiler, JavaCompilationResult
-from .java_planner import JavaPlanRequest, JavaPlanResult, JavaPlanner
+from .artifact_layout import (
+    ensure_prompt_artifact_dir,
+    format_artifact_attempt_label,
+    reset_prompt_artifact_dir,
+)
+from .java_plan_compiler import JavaCompilationResult, JavaPlanCompiler
+from .java_plan_fixer import JavaPlanFixer, PlanFixerRequest, PlanFixerResult
+from .java_planner import JavaPlanRequest, JavaPlanResult, JavaPlanner, _compute_prompt_hash
 from .plan_runner import PlanRunner
 
 
@@ -24,6 +35,9 @@ class PlanOrchestrator:
         max_error_hints: int = 3,
         max_compile_refinements: int = 3,
         plan_compiler: Optional[JavaPlanCompiler] = None,
+        plan_fixer: Optional[JavaPlanFixer] = None,
+        plan_fixer_max_attempts: int = 3,
+        plan_artifact_root: Optional[Path] = None,
     ) -> None:
         if max_retries < 0:
             raise ValueError("max_retries must be >= 0")
@@ -37,7 +51,15 @@ class PlanOrchestrator:
         self._max_error_hints = max_error_hints
         self._max_compile_refinements = max_compile_refinements
         self._plan_compiler = plan_compiler or JavaPlanCompiler()
+        self._plan_fixer = plan_fixer
+        self._plan_fixer_max_attempts = max(0, plan_fixer_max_attempts)
         self._plan_logger = logging.getLogger(PLAN_LOGGER_NAME)
+        if plan_artifact_root is not None:
+            self._plan_artifact_root = Path(plan_artifact_root)
+        elif plan_fixer is not None and hasattr(plan_fixer, "artifact_root"):
+            self._plan_artifact_root = Path(plan_fixer.artifact_root)
+        else:
+            self._plan_artifact_root = Path("plans")
 
     def execute_with_retries(
         self,
@@ -66,6 +88,7 @@ class PlanOrchestrator:
             plan_result, compile_attempts = self._compile_with_refinement(
                 effective_request,
                 plan_result,
+                attempt_number=attempt_idx + 1,
             )
             compile_success = not compile_attempts or compile_attempts[-1]["success"]
             if compile_success:
@@ -77,7 +100,7 @@ class PlanOrchestrator:
                     goal_summary=goal_summary,
                     deferred_metadata=self._clone_dict(deferred_metadata),
                     deferred_constraints=list(deferred_constraints) if deferred_constraints else None,
-                    tool_stub_class_name=base_request.tool_stub_class_name,
+                    tool_stub_class_name=effective_request.tool_stub_class_name,
                 )
             else:
                 execution_result = self._build_compile_failure_payload(compile_attempts[-1])
@@ -102,6 +125,17 @@ class PlanOrchestrator:
                     "telemetry": telemetry,
                     "summary": self._format_summary(telemetry),
                 }
+            failure_reason = format_execution_failure_reason(execution_result)
+            log_plan_failure_summary(
+                attempt_number=attempt_idx + 1,
+                plan_id=plan_result.plan_id,
+                reason=failure_reason,
+                metadata={
+                    "compile_success": compile_success,
+                    "repair_hint_count": len(repair_hints),
+                    "plan_metadata": dict(plan_result.metadata or {}),
+                },
+            )
             if attempt_idx == self._max_retries:
                 break
             repair_hints = self._build_repair_hints(execution_result)
@@ -154,9 +188,15 @@ class PlanOrchestrator:
         self,
         base_request: JavaPlanRequest,
         initial_plan: JavaPlanResult,
+        *,
+        attempt_number: int,
     ) -> Tuple[JavaPlanResult, List[Dict[str, Any]]]:
         plan = initial_plan
         attempts: List[Dict[str, Any]] = []
+        fixer_attempts = 0
+        previous_error_count: Optional[int] = None
+        self._persist_plan_inputs(plan, base_request, attempt_number)
+
         for iteration in range(1, self._max_compile_refinements + 1):
             compile_result = self._plan_compiler.compile(
                 plan.plan_source,
@@ -165,48 +205,43 @@ class PlanOrchestrator:
             )
             attempt_payload = self._format_compile_attempt(compile_result, iteration)
             attempts.append(attempt_payload)
+            error_count = len(attempt_payload.get("errors") or [])
             if compile_result.success:
                 return plan, attempts
-            if iteration == self._max_compile_refinements:
-                break
-            plan = self._planner.generate_plan(
-                self._build_refinement_request(base_request, plan, compile_result, iteration)
+
+            can_fix = (
+                self._plan_fixer is not None
+                and fixer_attempts < self._plan_fixer_max_attempts
+                and (previous_error_count is None or error_count <= previous_error_count)
             )
+            if can_fix:
+                fixer_attempts += 1
+                previous_error_count = error_count
+                prompt_hash = (
+                    plan.prompt_hash
+                    or plan.metadata.get("prompt_hash")
+                    or (
+                        _compute_prompt_hash(plan.prompt_messages)
+                        if plan.prompt_messages
+                        else plan.plan_id
+                    )
+                )
+                fix_request = PlanFixerRequest(
+                    plan_id=plan.plan_id,
+                    plan_source=plan.plan_source,
+                    prompt_hash=prompt_hash,
+                    compile_errors=compile_result.errors,
+                    tool_stub_source=base_request.tool_stub_source,
+                    tool_stub_class_name=base_request.tool_stub_class_name,
+                )
+                fix_result = self._plan_fixer.fix_plan(fix_request, attempt=fixer_attempts)
+                plan = self._apply_plan_fix(plan, fix_result)
+                self._persist_plan_inputs(plan, base_request, attempt_number)
+                continue
+
+            break
+
         return plan, attempts
-
-    def _build_refinement_request(
-        self,
-        base_request: JavaPlanRequest,
-        prior_plan: JavaPlanResult,
-        compile_result: JavaCompilationResult,
-        iteration: int,
-    ) -> JavaPlanRequest:
-        metadata = dict(base_request.metadata or {})
-        metadata["compile_refinement_iteration"] = iteration
-        return replace(
-            base_request,
-            metadata=metadata,
-            prior_plan_source=prior_plan.plan_source,
-            compile_error_report=self._summarize_compile_errors(compile_result),
-            refinement_iteration=iteration,
-        )
-
-    def _summarize_compile_errors(self, compile_result: JavaCompilationResult) -> str:
-        if compile_result.errors:
-            lines = [
-                "The previous Java plan failed to compile. Fix the following diagnostics in the next revision:",
-            ]
-            for idx, error in enumerate(compile_result.errors, start=1):
-                location = self._format_location_fragment(error)
-                message = self._extract_error_message(error)
-                lines.append(f"{idx}. {message}{location}")
-            return "\n".join(lines)
-        if compile_result.stderr.strip():
-            return (
-                "javac returned errors but no structured diagnostics were captured."
-                f" Raw output:\n{compile_result.stderr.strip()}"
-            )
-        return "Previous plan failed to compile for an unspecified reason."
 
     @staticmethod
     def _format_location_fragment(error: Any) -> str:
@@ -277,6 +312,14 @@ class PlanOrchestrator:
             "trace": [],
         }
 
+    @staticmethod
+    def _apply_plan_fix(plan: JavaPlanResult, fix_result: PlanFixerResult) -> JavaPlanResult:
+        plan.plan_source = fix_result.plan_source
+        if fix_result.notes:
+            notes = plan.metadata.setdefault("plan_fixer_notes", [])
+            notes.append(fix_result.notes)
+        return plan
+
     def _build_repair_hints(self, execution_result: Dict[str, Any]) -> List[str]:
         errors = execution_result.get("errors") or []
         hints: List[str] = []
@@ -289,6 +332,51 @@ class PlanOrchestrator:
                 "Previous attempt failed without structured errors. Ensure the plan parses and all referenced functions exist."
             )
         return hints
+
+    def _persist_plan_inputs(
+        self,
+        plan: JavaPlanResult,
+        request: JavaPlanRequest,
+        attempt_number: int,
+    ) -> None:
+        prompt_hash = (
+            plan.prompt_hash
+            or plan.metadata.get("prompt_hash")
+            or (_compute_prompt_hash(plan.prompt_messages) if plan.prompt_messages else None)
+            or plan.plan_id
+        )
+        if attempt_number == 1:
+            prompt_dir = reset_prompt_artifact_dir(self._plan_artifact_root, prompt_hash, plan.plan_id)
+        else:
+            try:
+                prompt_dir = ensure_prompt_artifact_dir(
+                    self._plan_artifact_root,
+                    prompt_hash,
+                    plan.plan_id,
+                )
+            except RuntimeError:
+                prompt_dir = reset_prompt_artifact_dir(
+                    self._plan_artifact_root,
+                    prompt_hash,
+                    plan.plan_id,
+                )
+        attempt_label = format_artifact_attempt_label(attempt_number)
+        base_dir = prompt_dir / attempt_label
+        try:
+            base_dir.mkdir(parents=True, exist_ok=True)
+            plan_path = base_dir / "Plan.java"
+            plan_path.write_text(plan.plan_source.strip() + "\n", encoding="utf-8")
+            if request.tool_stub_source:
+                stub_class = request.tool_stub_class_name or "PlanningToolStubs"
+                stub_path = base_dir / f"{stub_class}.java"
+                stub_path.write_text(request.tool_stub_source.strip() + "\n", encoding="utf-8")
+        except OSError as exc:  # pragma: no cover - filesystem issues are logged
+            self._plan_logger.warning(
+                "plan_artifact_write_failed plan_id=%s attempt=%s error=%s",
+                plan.plan_id,
+                attempt_number,
+                exc,
+            )
 
     @staticmethod
     def _format_error_hint(error: Dict[str, Any]) -> Optional[str]:

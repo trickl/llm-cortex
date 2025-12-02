@@ -8,6 +8,7 @@ import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional, Sequence
+from contextlib import contextmanager
 
 
 class JavaCompilationError(RuntimeError):
@@ -54,14 +55,14 @@ class JavaPlanCompiler:
         *,
         tool_stub_source: Optional[str] = None,
         tool_stub_class_name: Optional[str] = None,
+        working_dir: Optional[Path] = None,
     ) -> JavaCompilationResult:
         """Attempt to compile ``plan_source`` along with runtime stubs."""
 
         self._ensure_javac_available()
         class_name = self._detect_class_name(plan_source)
         package_name = self._extract_package(plan_source)
-        with tempfile.TemporaryDirectory(prefix="llmflow_plan_compile_") as tmpdir:
-            temp_dir = Path(tmpdir)
+        with self._select_directory(working_dir) as temp_dir:
             source_paths: List[Path] = []
             source_paths.append(
                 self._write_java_source(temp_dir, class_name, plan_source, package_name)
@@ -217,6 +218,16 @@ class JavaPlanCompiler:
         raise JavaCompilationError(
             f"Java compiler '{self._javac_path}' is not available on PATH. Install a JDK to enable plan compilation."
         )
+
+    @contextmanager
+    def _select_directory(self, working_dir: Optional[Path]):
+        if working_dir is None:
+            with tempfile.TemporaryDirectory(prefix="llmflow_plan_compile_") as tmpdir:
+                yield Path(tmpdir)
+        else:
+            path = Path(working_dir)
+            path.mkdir(parents=True, exist_ok=True)
+            yield path
 
 
 __all__ = [

@@ -25,10 +25,10 @@ hand the parsed structure to your `Agent` initialiser.
 
 ## quality_issue_agent_ollama.yaml
 
-Granite/Ollama-specific variant of the same preset. The workflow, tools, and
+Ollama-specific variant of the same preset. The workflow, tools, and
 environment bindings mirror the OpenAI file, but the `llm` block targets
-`granite4:3b` along with a longer timeout suitable for local inference. When
-running against Granite (or any Ollama model without reliable tool calls), set
+`qwen2.5-coder:7b` along with a longer timeout suitable for local inference. When
+running against Qwen (or any Ollama model without reliable tool calls), set
 `structured_mode: "json"` in the corresponding `llm_config.yaml` so Instructor
 parses plain JSON instead of expecting OpenAI-style tool invocations. The
 integration test suite references this file so logs and documentation stay in
