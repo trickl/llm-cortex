@@ -6,15 +6,15 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from llmflow.planning import JavaPlanRequest, JavaPlanner, JavaPlanningError
 from llmflow.logging_utils import LLM_LOGGER_NAME, PLAN_LOGGER_NAME
+from llmflow.planning import JavaPlanRequest, JavaPlanner, JavaPlanningError
+from llmflow.planning import java_planner as jp
 
 
 JAVA_PLAN = """
 public class Plan {
-    public void main() {
+    public static void main(String[] args) throws Exception {
         PlanningToolStubs.log("hello");
-        return;
     }
 }
 """.strip()
@@ -25,85 +25,58 @@ class DummyLLMClient:
         self.payload = payload
         self.messages = None
         self.kwargs = None
-        self.response_model = None
-        self.provider = type("Provider", (), {"max_retries": 0})()
-
-    def structured_generate(self, *, messages, response_model, **kwargs):
-        self.messages = messages
-        self.kwargs = kwargs
-        self.response_model = response_model
-        return response_model(**self.payload)
-
-    def generate(self, **kwargs):  # pragma: no cover - fallback stub
-        raise JavaPlanningError("Planner returned invalid payload")
-
-
-class FailingLLMClient:
-    def __init__(self, exception, fallback_plan=JAVA_PLAN):
-        self.exception = exception
-        self.fallback_plan = fallback_plan
-        self.provider = type("Provider", (), {"max_retries": 1})()
-        self.kwargs = None
-
-    def structured_generate(self, **kwargs):
-        self.kwargs = kwargs
-        raise self.exception
 
     def generate(self, **kwargs):
-        return {"content": self.fallback_plan}
+        self.messages = kwargs.get("messages")
+        self.kwargs = kwargs
+        arguments = json.dumps(self.payload)
+        return {
+            "tool_calls": [
+                {
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {
+                        "name": "define_java_plan",
+                        "arguments": arguments,
+                    },
+                }
+            ]
+        }
 
 
 class PlainFallbackRetryClient:
-    def __init__(self, exception, fallback_plan=JAVA_PLAN):
-        self.exception = exception
+    def __init__(self, fallback_plan=JAVA_PLAN):
         self.fallback_plan = fallback_plan
-        self.provider = type("Provider", (), {"max_retries": 1})()
         self.generate_calls: List[List[Dict[str, Any]]] = []
-
-    def structured_generate(self, **kwargs):
-        raise self.exception
 
     def generate(self, *, messages, **kwargs):
         self.generate_calls.append(messages)
         if len(self.generate_calls) == 1:
             return {"content": ""}
-        return {"content": self.fallback_plan}
+        return {
+            "tool_calls": [
+                {
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {
+                        "name": "define_java_plan",
+                        "arguments": json.dumps({"java": self.fallback_plan}),
+                    },
+                }
+            ]
+        }
 
 
 class PlainOnlyLLMClient:
     def __init__(self, fallback_plan=JAVA_PLAN):
         self.fallback_plan = fallback_plan
-        self.provider = type("Provider", (), {"max_retries": 0})()
         self.generate_calls = 0
         self.messages = None
-
-    def structured_generate(self, **kwargs):  # pragma: no cover - should not run
-        raise AssertionError("structured_generate should not be called when disabled")
 
     def generate(self, *, messages, **kwargs):
         self.generate_calls += 1
         self.messages = messages
         return {"content": self.fallback_plan}
-
-
-class FakeCompletion:
-    def __init__(self, payload):
-        self._payload = payload
-
-    def model_dump_json(self, indent=2):
-        return json.dumps(self._payload, indent=indent, ensure_ascii=False)
-
-
-class FakeAttempt:
-    def __init__(self, completion):
-        self.completion = completion
-
-
-class FakeInstructorException(Exception):
-    def __init__(self, completions):
-        super().__init__("validation error")
-        self.failed_attempts = [FakeAttempt(completion) for completion in completions]
-        self.last_completion = completions[-1] if completions else None
 
 
 def _format_log_call(call):
@@ -117,7 +90,7 @@ def _format_log_call(call):
 
 def test_planner_builds_prompt_and_returns_plan():
     client = DummyLLMClient({"java": JAVA_PLAN})
-    planner = JavaPlanner(client, specification="SPEC CONTENT", structured_enabled=True)
+    planner = JavaPlanner(client, specification="SPEC CONTENT")
     request = JavaPlanRequest(
         task="Fix the reported lint issue",
         context="Repository: example, Branch: main",
@@ -129,23 +102,19 @@ def test_planner_builds_prompt_and_returns_plan():
 
     assert result.plan_source.startswith("public class Plan")
     assert result.metadata["allowed_tools"] == ["cloneRepo", "log"]
-    assert "structured output" in client.messages[0]["content"]
+    assert "define_java_plan" in client.messages[0]["content"]
     user_prompt = client.messages[1]["content"]
     assert "Use the static methods on PlanningToolStubs" in user_prompt
-    assert "Available planning tools" not in user_prompt
     tool_choice = client.kwargs.get("tool_choice")
     assert tool_choice["function"]["name"] == "define_java_plan"
     tools = client.kwargs.get("tools")
     assert tools and tools[0]["function"]["name"] == "define_java_plan"
-    assert client.kwargs.get("max_retries") == 2
-    log_context = client.kwargs.get("log_context", {})
-    assert log_context.get("prefix", "").startswith("plan_id=")
-    assert callable(log_context.get("completion_logger"))
 
 
 def test_planner_includes_planner_notes():
     client = DummyLLMClient({"java": JAVA_PLAN, "notes": "ok"})
-    planner = JavaPlanner(client, specification="SPEC CONTENT", structured_enabled=True)
+    planner = JavaPlanner(client, specification="SPEC CONTENT")
+
     result = planner.generate_plan(JavaPlanRequest(task="Do work"))
 
     assert result.plan_source == JAVA_PLAN
@@ -154,7 +123,8 @@ def test_planner_includes_planner_notes():
 
 def test_planner_flattens_list_notes():
     client = DummyLLMClient({"java": JAVA_PLAN, "notes": ["first", "second"]})
-    planner = JavaPlanner(client, specification="SPEC CONTENT", structured_enabled=True)
+    planner = JavaPlanner(client, specification="SPEC CONTENT")
+
     result = planner.generate_plan(JavaPlanRequest(task="Do work"))
 
     assert result.metadata.get("planner_notes") == "first\n\nsecond"
@@ -162,7 +132,7 @@ def test_planner_flattens_list_notes():
 
 def test_planner_raises_when_java_missing():
     client = DummyLLMClient({"java": ""})
-    planner = JavaPlanner(client, specification="SPEC CONTENT", structured_enabled=True)
+    planner = JavaPlanner(client, specification="SPEC CONTENT")
 
     with pytest.raises(JavaPlanningError):
         planner.generate_plan(JavaPlanRequest(task="Summarize"))
@@ -170,7 +140,7 @@ def test_planner_raises_when_java_missing():
 
 def test_planner_includes_tool_stubs_in_system_prompt():
     client = DummyLLMClient({"java": JAVA_PLAN})
-    planner = JavaPlanner(client, specification="SPEC CONTENT", structured_enabled=True)
+    planner = JavaPlanner(client, specification="SPEC CONTENT")
     stub_source = "public final class DemoTools { public static void call() {} }"
 
     planner.generate_plan(
@@ -189,7 +159,7 @@ def test_planner_includes_tool_stubs_in_system_prompt():
 
 def test_planner_includes_refinement_context_in_user_prompt():
     client = DummyLLMClient({"java": JAVA_PLAN})
-    planner = JavaPlanner(client, specification="SPEC CONTENT", structured_enabled=True)
+    planner = JavaPlanner(client, specification="SPEC CONTENT")
     request = JavaPlanRequest(
         task="Do work",
         prior_plan_source="public class Bad { void main() {} }",
@@ -204,128 +174,7 @@ def test_planner_includes_refinement_context_in_user_prompt():
     assert "Missing syscall" in user_message
 
 
-def test_planner_logs_instructor_failure(monkeypatch):
-    from llmflow.planning import java_planner as jp
-
-    monkeypatch.setattr(jp, "InstructorRetryException", FakeInstructorException)
-    mock_plan_warning = MagicMock()
-    mock_plan_info = MagicMock()
-    mock_llm_error = MagicMock()
-    monkeypatch.setattr(jp.plan_logger, "warning", mock_plan_warning)
-    monkeypatch.setattr(jp.plan_logger, "info", mock_plan_info)
-    monkeypatch.setattr(jp.llm_logger, "error", mock_llm_error)
-    completion = FakeCompletion({"java": JAVA_PLAN, "notes": "bad"})
-    exception = FakeInstructorException([completion])
-    client = FailingLLMClient(exception)
-    planner = JavaPlanner(client, specification="SPEC CONTENT", structured_enabled=True)
-
-    planner.generate_plan(JavaPlanRequest(task="Do work", metadata={"plan_id": "plan-123"}))
-
-    plan_messages = [_format_log_call(call) for call in mock_plan_warning.call_args_list]
-    assert any("planner_structured_payload plan_id=plan-123" in message for message in plan_messages)
-
-    plan_info_messages = [_format_log_call(call) for call in mock_plan_info.call_args_list]
-    assert any("planner_structured_plan_body plan_id=plan-123" in message for message in plan_info_messages)
-    assert any("PlanningToolStubs.log" in message for message in plan_info_messages)
-
-    llm_messages = [_format_log_call(call) for call in mock_llm_error.call_args_list]
-    assert any("planner_structured_payload_dump plan_id=plan-123" in message for message in llm_messages)
-    assert any('"notes": "bad"' in message for message in llm_messages)
-
-
-def test_plan_logger_decodes_json_wrapped_plan(monkeypatch):
-    from llmflow.planning import java_planner as jp
-
-    mock_plan_info = MagicMock()
-    mock_llm_error = MagicMock()
-    monkeypatch.setattr(jp.plan_logger, "info", mock_plan_info)
-    monkeypatch.setattr(jp.llm_logger, "error", mock_llm_error)
-
-    completion = {"define_java_plan": "public class Planner {\\n    void run() {\\n        // noop\\n    }\\n}"}
-
-    jp._log_structured_completion_payload(
-        plan_id="plan-json",
-        attempt_label="1",
-        completion=completion,
-        stage="parse_error",
-    )
-
-    plan_info_messages = [_format_log_call(call) for call in mock_plan_info.call_args_list]
-    matching = [message for message in plan_info_messages if "planner_structured_plan_body" in message]
-    assert matching, "Plan logger did not emit decoded plan body."
-    header, _, body = matching[0].partition("\n")
-    assert body.strip().startswith("public class Planner")
-    assert "\\n" not in body
-    assert "\n" in body
-
-
-def test_plan_logger_formats_single_line_plan(monkeypatch):
-    from llmflow.planning import java_planner as jp
-
-    mock_plan_info = MagicMock()
-    mock_llm_error = MagicMock()
-    monkeypatch.setattr(jp.plan_logger, "info", mock_plan_info)
-    monkeypatch.setattr(jp.llm_logger, "error", mock_llm_error)
-
-    completion = {"java": "public class Planner { private void run() {} }"}
-
-    jp._log_structured_completion_payload(
-        plan_id="plan-single-line",
-        attempt_label="1",
-        completion=completion,
-        stage="parse_error",
-    )
-
-    plan_info_messages = [_format_log_call(call) for call in mock_plan_info.call_args_list]
-    matching = [message for message in plan_info_messages if "planner_structured_plan_body" in message]
-    assert matching
-    _, _, body = matching[0].partition("\n")
-    assert "\n" in body, "Expected formatter to insert newlines"
-    assert "public class Planner" in body
-
-
-def test_plan_logger_ignores_non_plan_strings(monkeypatch):
-    from llmflow.planning import java_planner as jp
-
-    mock_plan_info = MagicMock()
-    mock_llm_error = MagicMock()
-    monkeypatch.setattr(jp.plan_logger, "info", mock_plan_info)
-    monkeypatch.setattr(jp.llm_logger, "error", mock_llm_error)
-
-    plan_payload = {
-        "choices": [
-            {
-                "finish_reason": "stop",
-                "message": {
-                    "content": json.dumps(
-                        {
-                            "define_java_plan": "public class Planner {\n    void run() {}\n}"
-                        }
-                    )
-                },
-            }
-        ]
-    }
-
-    jp._log_structured_completion_payload(
-        plan_id="plan-nested",
-        attempt_label="1",
-        completion=plan_payload,
-        stage="parse_error",
-    )
-
-    plan_info_messages = [_format_log_call(call) for call in mock_plan_info.call_args_list]
-    matching = [message for message in plan_info_messages if "planner_structured_plan_body" in message]
-    assert matching, "Expected nested plan to be logged"
-    _, _, body = matching[0].partition("\n")
-    assert "finish_reason" not in body
-    assert "public class Planner" in body
-
-
 def test_log_files_capture_request_and_plan(monkeypatch):
-    from llmflow.planning import java_planner as jp
-
-    monkeypatch.setattr(jp, "InstructorRetryException", FakeInstructorException)
     monkeypatch.setattr(jp, "_current_timestamp_for_llm_log", lambda: "2025-01-01T00:00:00Z")
 
     plan_logger = logging.getLogger(PLAN_LOGGER_NAME)
@@ -345,10 +194,8 @@ def test_log_files_capture_request_and_plan(monkeypatch):
     plan_logger.setLevel(logging.INFO)
     llm_logger.setLevel(logging.INFO)
 
-    completion = FakeCompletion({"java": JAVA_PLAN})
-    exception = FakeInstructorException([completion])
-    client = FailingLLMClient(exception)
-    planner = JavaPlanner(client, specification="SPEC CONTENT", structured_enabled=True)
+    client = DummyLLMClient({"java": JAVA_PLAN})
+    planner = JavaPlanner(client, specification="SPEC CONTENT")
 
     try:
         planner.generate_plan(JavaPlanRequest(task="Do work", metadata={"plan_id": "plan-logs"}))
@@ -359,9 +206,8 @@ def test_log_files_capture_request_and_plan(monkeypatch):
         llm_logger.setLevel(old_llm_level)
 
     plan_output = plan_stream.getvalue()
-    assert "planner_structured_plan_body plan_id=plan-logs" in plan_output
+    assert "planner_plan_source plan_id=plan-logs" in plan_output
     assert "public class Plan" in plan_output
-    assert "PlanningToolStubs.log" in plan_output
 
     llm_output = llm_stream.getvalue()
     assert "[2025-01-01T00:00:00Z] Request - Role System - Input Token Count" in llm_output
@@ -371,26 +217,7 @@ def test_log_files_capture_request_and_plan(monkeypatch):
     assert "public class Plan" in llm_output
 
 
-def test_planner_allows_retry_override():
-    client = DummyLLMClient({"java": JAVA_PLAN})
-    planner = JavaPlanner(
-        client,
-        specification="SPEC CONTENT",
-        structured_max_retries=2,
-        structured_enabled=True,
-    )
-
-    planner.generate_plan(JavaPlanRequest(task="Do work"))
-
-    log_context = client.kwargs.get("log_context", {})
-    assert client.kwargs.get("max_retries") == 2
-    assert log_context.get("logger_name") == PLAN_LOGGER_NAME
-    assert callable(log_context.get("completion_logger"))
-
-
-def test_planner_defaults_to_plain_generation(monkeypatch):
-    monkeypatch.delenv("LLMFLOW_PLANNER_ENABLE_STRUCTURED", raising=False)
-    monkeypatch.delenv("LLMFLOW_PLANNER_DISABLE_STRUCTURED", raising=False)
+def test_planner_defaults_to_plain_generation():
     client = PlainOnlyLLMClient()
     planner = JavaPlanner(client, specification="SPEC CONTENT")
 
@@ -398,80 +225,11 @@ def test_planner_defaults_to_plain_generation(monkeypatch):
 
     assert result.plan_source == JAVA_PLAN
     assert client.generate_calls == 1
-
-
-def test_planner_enable_env_allows_structured(monkeypatch):
-    monkeypatch.setenv("LLMFLOW_PLANNER_ENABLE_STRUCTURED", "1")
-    monkeypatch.delenv("LLMFLOW_PLANNER_DISABLE_STRUCTURED", raising=False)
-    client = DummyLLMClient({"java": JAVA_PLAN})
-    planner = JavaPlanner(client, specification="SPEC CONTENT")
-
-    result = planner.generate_plan(JavaPlanRequest(task="Do work"))
-
-    assert result.plan_source == JAVA_PLAN
-    assert client.kwargs.get("max_retries") == 2
-
-
-def test_planner_disable_env_overrides_enable(monkeypatch):
-    monkeypatch.setenv("LLMFLOW_PLANNER_ENABLE_STRUCTURED", "1")
-    monkeypatch.setenv("LLMFLOW_PLANNER_DISABLE_STRUCTURED", "true")
-    client = PlainOnlyLLMClient()
-    planner = JavaPlanner(client, specification="SPEC CONTENT")
-
-    result = planner.generate_plan(JavaPlanRequest(task="Do work"))
-
-    assert result.plan_source == JAVA_PLAN
-    assert client.generate_calls == 1
-
-
-def test_planner_env_var_controls_retry(monkeypatch):
-    client = DummyLLMClient({"java": JAVA_PLAN})
-    monkeypatch.setenv("LLMFLOW_PLANNER_STRUCTURED_MAX_RETRIES", "5")
-    planner = JavaPlanner(client, specification="SPEC CONTENT", structured_enabled=True)
-
-    planner.generate_plan(JavaPlanRequest(task="Do work"))
-
-    assert client.kwargs.get("max_retries") == 5
-
-
-def test_planner_payload_renders_ast_structure():
-    from llmflow.planning import java_planner as jp
-
-    payload = {
-        "name": "Planner",
-        "imports": ["java.util.Map"],
-        "main": {
-            "statements": ["PlanningToolStubs.read_file(\"README.md\");"],
-        },
-    }
-
-    model = jp._PlannerToolPayload(**payload)
-
-    assert "public class Planner" in model.java
-    assert "PlanningToolStubs.read_file" in model.java
-
-
-def test_planner_payload_handles_json_wrapped_ast_string():
-    from llmflow.planning import java_planner as jp
-
-    ast_payload = {
-        "name": "Planner",
-        "main": {
-            "statements": ["PlanningToolStubs.log(\"ok\");"],
-        },
-    }
-    wrapped = json.dumps({"notes": None, "java": json.dumps(ast_payload)})
-
-    model = jp._PlannerToolPayload(**{"java": wrapped})
-
-    assert "public class Planner" in model.java
-    assert "PlanningToolStubs.log" in model.java
 
 
 def test_plain_fallback_sends_retry_prompt():
-    exception = RuntimeError("Missing field 'java'")
-    client = PlainFallbackRetryClient(exception)
-    planner = JavaPlanner(client, specification="SPEC CONTENT", structured_enabled=True)
+    client = PlainFallbackRetryClient()
+    planner = JavaPlanner(client, specification="SPEC CONTENT")
 
     result = planner.generate_plan(JavaPlanRequest(task="Handle retries"))
 
@@ -479,21 +237,49 @@ def test_plain_fallback_sends_retry_prompt():
     assert len(client.generate_calls) == 2
     first_followup = client.generate_calls[0][-1]["content"]
     second_followup = client.generate_calls[1][-1]["content"]
-    assert "Structured tool calls failed" in first_followup
+    assert "Output the Java class" in first_followup
     assert "Your prior response was empty or malformed" in second_followup
 
 
-def test_planner_logs_llm_request_payload(monkeypatch):
-    from llmflow.planning import java_planner as jp
+def test_plain_prompt_mentions_helper_focus():
+    client = PlainOnlyLLMClient()
+    planner = JavaPlanner(client, specification="SPEC CONTENT")
+    helper_focus = {
+        "function": "hasOpenIssues",
+        "comment": "Stub: determine if repository has open issues",
+        "message": "Helper 'hasOpenIssues' is a placeholder.",
+    }
+    request = JavaPlanRequest(
+        task="Implement helper method 'hasOpenIssues'.",
+        metadata={"helper_focus": helper_focus},
+    )
 
+    planner.generate_plan(request)
+
+    assert client.messages and len(client.messages) >= 3
+    plain_prompt = client.messages[-1]["content"]
+    assert "hasOpenIssues" in plain_prompt
+    assert "Keep main()" in plain_prompt
+    assert "Stub: determine if repository has open issues" in plain_prompt
+
+
+def test_planner_logs_llm_request_payload(monkeypatch):
     mock_llm_info = MagicMock()
     monkeypatch.setattr(jp.llm_logger, "info", mock_llm_info)
 
     client = DummyLLMClient({"java": JAVA_PLAN})
-    planner = JavaPlanner(client, specification="SPEC CONTENT", structured_enabled=True)
+    planner = JavaPlanner(client, specification="SPEC CONTENT")
 
     planner.generate_plan(JavaPlanRequest(task="Capture request"))
 
     info_messages = [_format_log_call(call) for call in mock_llm_info.call_args_list]
     assert any("Role System - Input Token Count" in message for message in info_messages)
     assert any("Role User - Input Token Count" in message for message in info_messages)
+
+
+def test_extract_plan_from_nested_tool_payload():
+    payload = {"define_java_plan": json.dumps({"java": JAVA_PLAN})}
+
+    result = jp._extract_plan_from_dict(payload)
+
+    assert result == JAVA_PLAN

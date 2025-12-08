@@ -5,6 +5,7 @@ import json
 import logging
 import re
 import shutil
+import textwrap
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -45,6 +46,7 @@ class PlanOrchestrator:
         max_retries: int = 1,
         max_error_hints: int = 3,
         max_compile_refinements: int = 3,
+        max_structure_attempts: int = 5,
         plan_compiler: Optional[JavaPlanCompiler] = None,
         plan_fixer: Optional[JavaPlanFixer] = None,
         plan_fixer_max_attempts: int = 3,
@@ -57,11 +59,14 @@ class PlanOrchestrator:
             raise ValueError("max_error_hints must be >= 1")
         if max_compile_refinements < 1:
             raise ValueError("max_compile_refinements must be >= 1")
+        if max_structure_attempts < 1:
+            raise ValueError("max_structure_attempts must be >= 1")
         self._planner = planner
         self._runner_factory = runner_factory
         self._max_retries = max_retries
         self._max_error_hints = max_error_hints
         self._max_compile_refinements = max_compile_refinements
+        self._max_structure_attempts = max_structure_attempts
         self._plan_compiler = plan_compiler or JavaPlanCompiler()
         self._plan_fixer = plan_fixer
         self._plan_fixer_max_attempts = max(0, plan_fixer_max_attempts)
@@ -99,19 +104,14 @@ class PlanOrchestrator:
         request.metadata = dict(request.metadata or {})
         base_prompt_hash: Optional[str] = None
         stub_hash: Optional[str] = None
-        cached_plan: Optional[CachedPlan] = None
         artifact_bases: Dict[str, int] = {}
         artifact_offsets: Dict[str, int] = {}
+        pending_helper_focus: Optional[Dict[str, Any]] = None
 
         if self._cache_enabled:
             base_prompt_hash = self._planner.compute_prompt_hash(request)
             request.metadata.setdefault("plan_id", base_prompt_hash)
             stub_hash = compute_stub_hash(request.tool_stub_source)
-            cached_plan = self._plan_cache.load(
-                base_prompt_hash,
-                stub_hash=stub_hash,
-                stub_class_name=request.tool_stub_class_name,
-            )
 
         def allocate_artifact_attempt(prompt_hash: Optional[str], fallback_attempt: int) -> int:
             if not self._cache_enabled or not prompt_hash:
@@ -123,10 +123,33 @@ class PlanOrchestrator:
             artifact_offsets[prompt_hash] = offset + 1
             return attempt_number
 
-        for attempt_idx in range(self._max_retries + 1):
+        attempt_idx = 0
+        structure_attempts = 0
+        retry_attempts = 0
+        while True:
+            attempt_idx += 1
             artifacts: Optional[PlanExecutionArtifacts] = None
-            use_cache = attempt_idx == 0 and not repair_hints and cached_plan is not None
-            if use_cache:
+            effective_request = self._augment_request(
+                request,
+                attempt_idx - 1,
+                repair_hints,
+                helper_focus=pending_helper_focus,
+            )
+            pending_helper_focus = None
+            tool_stub_class_name = effective_request.tool_stub_class_name
+            artifact_prompt_hash: Optional[str] = None
+            cached_plan: Optional[CachedPlan] = None
+            if self._cache_enabled:
+                artifact_prompt_hash = self._planner.compute_prompt_hash(effective_request)
+                effective_request.metadata.setdefault("plan_id", artifact_prompt_hash)
+                stub_hash = compute_stub_hash(effective_request.tool_stub_source)
+                cached_plan = self._plan_cache.load(
+                    artifact_prompt_hash,
+                    stub_hash=stub_hash,
+                    stub_class_name=tool_stub_class_name,
+                )
+
+            if cached_plan is not None:
                 plan_result = cached_plan.plan
                 artifact_attempt = cached_plan.attempt_number
                 compile_attempts = [
@@ -137,21 +160,21 @@ class PlanOrchestrator:
                     }
                 ]
                 compile_success = True
-                tool_stub_class_name = request.tool_stub_class_name
                 artifacts = self._build_cached_artifacts(plan_result, cached_plan, tool_stub_class_name)
+                artifact_prompt_hash = cached_plan.prompt_hash
                 self._plan_logger.info(
                     "java_plan cache_hit=1 plan_id=%s attempt=%s prompt_hash=%s",
                     plan_result.plan_id,
                     artifact_attempt,
                     plan_result.prompt_hash,
                 )
-                cached_plan = None
             else:
-                effective_request = self._augment_request(request, attempt_idx, repair_hints)
                 plan_result = self._planner.generate_plan(effective_request)
-                self._log_plan_attempt(attempt_idx + 1, plan_result)
-                artifact_prompt_hash = self._extract_prompt_hash(plan_result)
-                artifact_attempt = allocate_artifact_attempt(artifact_prompt_hash, attempt_idx + 1)
+                self._log_plan_attempt(attempt_idx, plan_result)
+                artifact_prompt_hash = artifact_prompt_hash or self._extract_prompt_hash(plan_result)
+                if artifact_prompt_hash is None:
+                    artifact_prompt_hash = plan_result.plan_id
+                artifact_attempt = allocate_artifact_attempt(artifact_prompt_hash, attempt_idx)
                 plan_result, compile_attempts, artifacts = self._compile_with_refinement(
                     effective_request,
                     plan_result,
@@ -159,7 +182,6 @@ class PlanOrchestrator:
                     prompt_hash_override=artifact_prompt_hash,
                 )
                 compile_success = not compile_attempts or compile_attempts[-1]["success"]
-                tool_stub_class_name = effective_request.tool_stub_class_name
             if compile_success:
                 runner = self._runner_factory()
                 if hasattr(runner, "bind_plan_artifacts"):
@@ -178,7 +200,7 @@ class PlanOrchestrator:
             else:
                 execution_result = self._build_compile_failure_payload(compile_attempts[-1])
             attempt_record = {
-                "attempt": attempt_idx + 1,
+                "attempt": attempt_idx,
                 "plan": plan_result,
                 "plan_id": plan_result.plan_id,
                 "plan_metadata": dict(plan_result.metadata or {}),
@@ -198,9 +220,21 @@ class PlanOrchestrator:
                     "telemetry": telemetry,
                     "summary": self._format_summary(telemetry),
                 }
+            stub_errors = self._extract_stub_errors(execution_result)
+            if stub_errors and structure_attempts < self._max_structure_attempts:
+                structure_attempts += 1
+                repair_hints, pending_helper_focus = self._build_stub_followups(stub_errors)
+                self._plan_logger.info(
+                    "java_plan stub_followup=%s helper=%s plan_id=%s",
+                    structure_attempts,
+                    stub_errors[0].get("function"),
+                    plan_result.plan_id,
+                )
+                continue
+
             failure_reason = format_execution_failure_reason(execution_result)
             log_plan_failure_summary(
-                attempt_number=attempt_idx + 1,
+                attempt_number=attempt_idx,
                 plan_id=plan_result.plan_id,
                 reason=failure_reason,
                 metadata={
@@ -209,8 +243,9 @@ class PlanOrchestrator:
                     "plan_metadata": dict(plan_result.metadata or {}),
                 },
             )
-            if attempt_idx == self._max_retries:
+            if retry_attempts >= self._max_retries:
                 break
+            retry_attempts += 1
             repair_hints = self._build_repair_hints(execution_result)
 
         telemetry = self._build_telemetry(attempts)
@@ -239,6 +274,8 @@ class PlanOrchestrator:
         original: JavaPlanRequest,
         attempt_idx: int,
         repair_hints: Sequence[str],
+        *,
+        helper_focus: Optional[Dict[str, Any]] = None,
     ) -> JavaPlanRequest:
         if attempt_idx == 0 and not repair_hints:
             return original
@@ -246,14 +283,30 @@ class PlanOrchestrator:
         merged_constraints = list(original.additional_constraints or [])
         merged_constraints.extend(repair_hints)
 
+        task_text = original.task
+        context_text = original.context
+        if helper_focus:
+            task_text, derived_context = self._build_helper_task(original, helper_focus)
+            if derived_context:
+                context_text = derived_context
+            helper_name = helper_focus.get("function")
+            if helper_name:
+                merged_constraints.append(
+                    f"Limit code changes to the helper method '{helper_name}' unless additional helpers are strictly required to support its logic."
+                )
+
         metadata = dict(original.metadata or {})
         metadata["attempt_index"] = attempt_idx + 1
         if repair_hints:
             metadata["repair_hints"] = list(repair_hints)
+        if helper_focus:
+            metadata["helper_focus"] = dict(helper_focus)
 
         return replace(
             original,
             additional_constraints=merged_constraints,
+            task=task_text,
+            context=context_text,
             metadata=metadata,
         )
 
@@ -492,6 +545,84 @@ class PlanOrchestrator:
                 "Previous attempt failed without structured errors. Ensure the plan parses and all referenced functions exist."
             )
         return hints
+
+    @staticmethod
+    def _extract_stub_errors(execution_result: Dict[str, Any]) -> List[Dict[str, Any]]:
+        errors = execution_result.get("errors") or []
+        results: List[Dict[str, Any]] = []
+        for error in errors:
+            if not isinstance(error, dict):
+                continue
+            if (error.get("type") or "").lower() != "stub_method":
+                continue
+            results.append(error)
+        return results
+
+    def _build_stub_followups(
+        self,
+        stub_errors: Sequence[Dict[str, Any]],
+    ) -> Tuple[List[str], Optional[Dict[str, Any]]]:
+        hints: List[str] = []
+        helper_focus: Optional[Dict[str, Any]] = None
+        for error in list(stub_errors)[: self._max_error_hints]:
+            function_name = error.get("function") or "helper method"
+            message = error.get("message") or "This helper is still a placeholder."
+            hint = (
+                f"Implement helper method '{function_name}' so it performs the described behavior. {message}"
+            ).strip()
+            hints.append(hint)
+            if helper_focus is None:
+                helper_focus = {
+                    "function": function_name,
+                    "comment": error.get("comment"),
+                    "message": message,
+                }
+        if not hints:
+            hints.append("Implement any remaining placeholder helper methods using PlanningToolStubs.")
+        return hints, helper_focus
+
+    def _build_helper_task(
+        self,
+        base_request: JavaPlanRequest,
+        helper_focus: Dict[str, Any],
+    ) -> Tuple[str, Optional[str]]:
+        helper_name = helper_focus.get("function") or "the helper method"
+        comment = helper_focus.get("comment")
+        analyzer_message = helper_focus.get("message")
+        description_lines: List[str] = [
+            f"Implement the existing helper method '{helper_name}' inside the Planner class.",
+            "Focus exclusively on this helper's responsibilities; keep main() and other helpers unchanged unless a tiny supporting helper is absolutely required.",
+            "Honor the current method signature and return type, and use PlanningToolStubs.<name>(...) helpers for every external action (issue lookup, repo access, etc.).",
+        ]
+        if comment:
+            description_lines.append(f"Design note from the stub: {comment.strip()}")
+        if analyzer_message:
+            normalized_message = analyzer_message.strip()
+            if not comment or normalized_message != comment.strip():
+                description_lines.append(normalized_message)
+        description_lines.extend(
+            [
+                "Break the helper's work into clear tool-driven steps.",
+                "Add comments only when describing TODOs or placeholders for unavailable integrations.",
+            ]
+        )
+        helper_task = "\n\n".join(line for line in description_lines if line).strip()
+
+        broader_context = textwrap.dedent(base_request.task or "").strip()
+        derived_context_parts: List[str] = []
+        if broader_context:
+            derived_context_parts.append("Broader workflow context:")
+            derived_context_parts.append(broader_context)
+        if base_request.context:
+            derived_context_parts.append("")
+            derived_context_parts.append("Existing context:")
+            derived_context_parts.append(textwrap.dedent(base_request.context).strip())
+        if comment:
+            derived_context_parts.append("")
+            derived_context_parts.append("Helper stub note:")
+            derived_context_parts.append(comment.strip())
+        derived_context = "\n".join(part for part in derived_context_parts if part).strip()
+        return helper_task, (derived_context or base_request.context)
 
     def _persist_plan_inputs(
         self,

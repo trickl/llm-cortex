@@ -1,0 +1,33 @@
+--- a/Planner.java
++++ b/Planner.java
+@@ -1,2 +1,4 @@
+ import java.util.List;
++import java.util.Map;
+ 
+ public class Planner {
+@@ -3,2 +5,4 @@
+     public static void main(String[] args) {
+         if (hasOpenIssues()) {
+             Map<String, Object> issue = getFirstIssue();
+-            String repoPath = checkoutRepo((String) issue.get("repo_url"));
++            String repoPath = checkoutRepo(issue);
+             String branchName = "fix-" + issue.get("id");
+             PlanningToolStubs.create_branch(repoPath, branchName);
+@@ -10,2 +12,4 @@
+     private static boolean hasOpenIssues() {
+         // Stub: Check if there are any open issues in Qlty.
+-        return false;
++        return true; // Placeholder for actual implementation
+     }
+ 
+     private static Map<String, Object> getFirstIssue() {
+         // Stub: Retrieve the first open issue from Qlty.
+-        return null;
++        return Map.of("repo_url", "https://github.com/user/repo.git", "id", 123); // Placeholder for actual implementation
+     }
+ 
+     private static String checkoutRepo(Map<String, Object> issue) {
+         // Stub: Checkout the relevant GitHub repository.
+-        return "/path/to/repo";
++        return (String) issue.get("repo_url"); // Placeholder for actual implementation
+     }

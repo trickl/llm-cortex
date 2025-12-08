@@ -113,6 +113,7 @@ def detect_stub_method_errors(graph: JavaPlanGraph) -> List[Dict[str, Any]]:
                 "type": "stub_method",
                 "message": message,
                 "function": function.name,
+                "comment": function.stub_comment,
             }
         )
     return errors

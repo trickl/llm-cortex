@@ -9,6 +9,7 @@ from llmflow.planning import (
     JavaPlanFixer,
     PlanFixerRequest,
 )
+from llmflow.planning.java_plan_fixer import _ContextPatch
 
 
 FIXED_PLAN = """
@@ -24,6 +25,27 @@ BROKEN_PLAN = """
 public class Planner {
     public static void main(String[] args) throws Exception {
         System.out.println("TODO");
+    }
+}
+""".strip()
+
+
+LONG_METHOD_PLAN = """
+public class Planner {
+    public static void main(String[] args) throws Exception {
+        String repo = "demo";
+        String issue = "1";
+        String branch = repo + issue;
+        System.out.println(repo);
+        System.out.println(issue);
+        System.out.println(branch);
+        System.out.println(branch.toLowerCase());
+        System.out.println(branch.repeat(1));
+        System.out.println("done");
+    }
+
+    private static boolean hasOpenIssues() {
+        return false;
     }
 }
 """.strip()
@@ -101,6 +123,42 @@ def _foreign_file_patch_text() -> str:
             "@@ -1,1 +1,1 @@",
             "-public class Other {}",
             "+public class Other { void run() {} }",
+        ]
+    )
+
+
+def _fenced_patch_text() -> str:
+    return "\n".join([
+        "```",
+        _patch_text(),
+        "```",
+    ])
+
+
+def _method_span_patch_text() -> str:
+    return "\n".join(
+        [
+            "--- a/Planner.java",
+            "+++ b/Planner.java",
+            "@@ -2,11 +2,12 @@",
+            " public class Planner {",
+            "     public static void main(String[] args) throws Exception {",
+            '         String repo = "demo";',
+            '         String issue = "1";',
+            '         String branch = repo + issue;',
+            '         System.out.println(repo);',
+            '         System.out.println(issue);',
+            '         System.out.println(branch);',
+            '+        System.out.println(branch.toUpperCase());',
+            '         System.out.println(branch.toLowerCase());',
+            '         System.out.println(branch.repeat(1));',
+            '         System.out.println("done");',
+            "     }",
+            "",
+            "     private static boolean hasOpenIssues() {",
+            "         return false;",
+            "     }",
+            " }",
         ]
     )
 
@@ -415,3 +473,56 @@ def test_parse_patch_respects_diagnostic_windows():
             skip_callback=skips.append,
         )
     assert any("outside diagnostics" in reason for reason in skips)
+
+
+def test_parse_patch_accepts_code_fence_wrappers():
+    fixer = JavaPlanFixer(PlainLLMClient(_fenced_patch_text()))
+    patches, _ = fixer._parse_patch_text(
+        _fenced_patch_text(),
+        BROKEN_PLAN,
+        allowed_filenames={"Planner.java"},
+    )
+    assert patches
+
+
+def test_parse_patch_expands_diagnostics_to_method_scope():
+    fixer = JavaPlanFixer(PlainLLMClient(_method_span_patch_text()))
+    errors = [_make_error(4)]
+    windows = fixer._build_error_windows(errors, "Planner.java", LONG_METHOD_PLAN)
+    patches, _ = fixer._parse_patch_text(
+        _method_span_patch_text(),
+        LONG_METHOD_PLAN,
+        allowed_filenames={"Planner.java"},
+        line_windows=windows,
+    )
+    assert patches
+    assert any("branch.toUpperCase" in patch.replacement_code for patch in patches)
+
+
+def test_apply_contextual_patches_reports_context_on_failure():
+    patch = _ContextPatch(
+        before_context="missing context\n",
+        current_code="",
+        after_context="unreachable\n",
+        replacement_code="replacement\n",
+    )
+    with pytest.raises(ValueError) as excinfo:
+        JavaPlanFixer._apply_contextual_patches(BROKEN_PLAN, [patch])
+    assert "patch #1" in str(excinfo.value)
+
+
+def test_apply_contextual_patches_uses_fuzzy_matching_for_file_header():
+    patch = _ContextPatch(
+        before_context="import java.util.List;\nimport java.util.Map;\npublic class Planner {\n",
+        current_code="",
+        after_context="    public static void main(String[] args) throws Exception {\n",
+        replacement_code=(
+            "import java.util.List;\n"
+            "import java.util.Map;\n"
+            "public class Planner {\n"
+        ),
+    )
+    updated = JavaPlanFixer._apply_contextual_patches(BROKEN_PLAN, [patch])
+    assert updated.startswith(
+        "import java.util.List;\nimport java.util.Map;\npublic class Planner"
+    )

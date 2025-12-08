@@ -1,0 +1,37 @@
+===== PATCH 1 =====
+--- a/Planner.java
++++ b/Planner.java
+@@ -1,5 +1,5 @@
+ import java.util.List;
+-import java.util.Map;
+
+ public class Planner {
+     public static void main(String[] args) {
+         if (hasOpenIssues()) {
+             Map<String, Object> issue = getFirstIssue();
+             String repoPath = checkoutRepo((String) issue.get("repo"));
+             String branchName = "fix-" + issue.get("id");
+@@ -14,6 +14,7 @@
+     }
+
+     private static boolean hasOpenIssues() {
++        // TODO: Implement logic to check for open issues in Qlty.
+         return false;
+     }
+
+     private static Map<String, Object> getFirstIssue() {
+         // Stub: Get the first issue from Qlty.
+         return PlanningToolStubs.search_text_in_repository("qlty", "open", true, 1, false, List.of("issue"));
+     }
+
+     private static String checkoutRepo(String repoUrl) {
+         // Stub: Checkout the relevant GitHub repository.
+         PlanningToolStubs.run_command("git clone " + repoUrl);
+         return repoUrl.split("/")[4];
+     }
+
+     private static String generateFixCode(Map<String, Object> issue) {
+         // Placeholder for code generation logic based on the issue.
+         return "public class Fix { public void fix() {} }";
+     }
+ }

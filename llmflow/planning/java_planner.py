@@ -4,7 +4,6 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import os
 import re
 import textwrap
 import time
@@ -14,13 +13,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Match, Optional, Sequence, Tuple
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
-
-try:  # pragma: no cover - guard against optional dependency changes
-    from instructor.core.exceptions import InstructorRetryException
-except ImportError:  # pragma: no cover
-    InstructorRetryException = None  # type: ignore[assignment]
-
 from llmflow.llm_client import LLMClient
 from llmflow.logging_utils import LLM_LOGGER_NAME, PLAN_LOGGER_NAME
 
@@ -29,36 +21,8 @@ _EMBEDDED_SPEC = (
     "that calls PlanningToolStubs helpers to perform every side effect. Prefer helper decomposition, "
     "avoid markdown, and emit compilable Java source."
 )
-_STRUCTURED_MAX_RETRIES_ENV = "LLMFLOW_PLANNER_STRUCTURED_MAX_RETRIES"
-_STRUCTURED_DISABLED_ENV = "LLMFLOW_PLANNER_DISABLE_STRUCTURED"
-_STRUCTURED_ENABLE_ENV = "LLMFLOW_PLANNER_ENABLE_STRUCTURED"
 _PLAIN_FALLBACK_MAX_ATTEMPTS = 2
 _PLANNER_TOOL_NAME = "define_java_plan"
-
-def _read_structured_retry_limit() -> Optional[int]:
-    value = os.getenv(_STRUCTURED_MAX_RETRIES_ENV)
-    if not value:
-        return None
-    try:
-        parsed = int(value)
-    except ValueError:
-        logger.warning(
-            "Invalid %s value '%s'; falling back to provider defaults",
-            _STRUCTURED_MAX_RETRIES_ENV,
-            value,
-        )
-        return None
-    if parsed < 0:
-        logger.warning(
-            "%s must be >= 0; falling back to provider defaults",
-            _STRUCTURED_MAX_RETRIES_ENV,
-        )
-        return None
-    return parsed
-
-
-def _is_truthy(value: str) -> bool:
-    return value.strip().lower() in {"1", "true", "yes", "on", "enabled"}
 
 logger = logging.getLogger(__name__)
 plan_logger = logging.getLogger(PLAN_LOGGER_NAME)
@@ -217,9 +181,9 @@ def _strip_trailing_backticks(source: str) -> str:
 def _wrap_statements_in_class(candidate: str) -> Optional[str]:
     decoded = _decode_plan_string(candidate)
     if isinstance(decoded, dict):
-        rendered = _render_java_from_structured_payload(decoded)
-        if rendered:
-            return rendered
+        extracted = _extract_plan_from_dict(decoded)
+        if extracted:
+            candidate = extracted
     elif isinstance(decoded, str) and decoded.strip():
         candidate = decoded.strip()
     lines = [line.rstrip() for line in candidate.splitlines() if line.strip()]
@@ -263,172 +227,16 @@ def _wrap_statements_in_class(candidate: str) -> Optional[str]:
     return "\n".join(assembled).strip()
 
 
-def _extract_tool_call_count(exc: Exception) -> Optional[int]:
-    """Best-effort extraction of tool call count from Instructor retries."""
-
-    if InstructorRetryException is None:
+def _normalize_planner_notes(value: Optional[Any]) -> Optional[str]:
+    if value is None:
         return None
-    if not isinstance(exc, InstructorRetryException):
-        return None
-    attempts = getattr(exc, "failed_attempts", None)
-    if not attempts:
-        return None
-    for attempt in attempts:
-        completion = getattr(attempt, "completion", None)
-        if not completion:
-            continue
-        choices = getattr(completion, "choices", None)
-        if not choices:
-            continue
-        message = getattr(choices[0], "message", None)
-        if not message:
-            continue
-        tool_calls = getattr(message, "tool_calls", None)
-        if tool_calls is None:
-            return 0
-        return len(tool_calls)
-    return None
-
-
-def _summarize_structured_failure(exc: Exception) -> Optional[str]:
-    """Return a user-friendly explanation for structured generation failures."""
-
-    count = _extract_tool_call_count(exc)
-    if count == 0:
-        return "Structured Java plan request produced no tool calls."
-    if count and count != 1:
-        return f"Structured Java plan request produced {count} tool calls; expected exactly one."
-
-    message = str(exc)
-    if "Instructor does not support multiple tool calls" in message:
-        return "Structured Java plan request did not yield exactly one tool call."
-    if message:
-        return f"Structured Java plan request failed: {message}"
-    return None
-
-
-def _serialize_completion_for_logging(completion: Any) -> Optional[str]:
-    if completion is None:
-        return None
-    serializer = getattr(completion, "model_dump_json", None)
-    if callable(serializer):
-        try:
-            return serializer(indent=2)
-        except TypeError:
-            try:
-                return serializer()
-            except Exception:  # pragma: no cover - best effort only
-                pass
-    model_dump = getattr(completion, "model_dump", None)
-    if callable(model_dump):
-        try:
-            dumped = model_dump()
-            return json.dumps(dumped, indent=2, ensure_ascii=False)
-        except Exception:  # pragma: no cover - best effort only
-            pass
-    try:
-        return json.dumps(completion, indent=2, ensure_ascii=False)
-    except TypeError:
-        return str(completion)
-
-
-def _log_structured_failure_details(plan_id: str, exc: Exception) -> None:
-    plan_logger.error(
-        "planner_structured_exception plan_id=%s type=%s message=%s",
-        plan_id,
-        type(exc).__name__,
-        exc,
-    )
-    if InstructorRetryException is None or not isinstance(exc, InstructorRetryException):
-        return
-    attempts = getattr(exc, "failed_attempts", None) or []
-    if not attempts:
-        completion = getattr(exc, "last_completion", None)
-        _log_structured_completion_payload(
-            plan_id=plan_id,
-            attempt_label="last",
-            completion=completion,
-            stage="retry_failure",
-        )
-        return
-    for idx, attempt in enumerate(attempts, start=1):
-        completion = getattr(attempt, "completion", None) or getattr(attempt, "response", None)
-        _log_structured_completion_payload(
-            plan_id=plan_id,
-            attempt_label=str(idx),
-            completion=completion,
-            stage="retry_failure",
-        )
-
-
-def _log_structured_attempt_completion(plan_id: str, attempt: int, completion: Any) -> None:
-    _log_structured_completion_payload(
-        plan_id=plan_id,
-        attempt_label=str(attempt),
-        completion=completion,
-        stage="parse_error",
-    )
-
-
-def _log_structured_completion_payload(
-    *,
-    plan_id: str,
-    attempt_label: str,
-    completion: Any,
-    stage: str,
-) -> None:
-    serialized = _serialize_completion_for_logging(completion)
-    if not serialized:
-        return
-    plan_logger.warning(
-        "planner_structured_payload plan_id=%s attempt=%s stage=%s detail=full_completion_logged_to=agentcortex.llm",
-        plan_id,
-        attempt_label,
-        stage,
-    )
-    llm_logger.error(
-        "planner_structured_payload_dump plan_id=%s attempt=%s stage=%s\n%s",
-        plan_id,
-        attempt_label,
-        stage,
-        serialized,
-    )
-
-    plan_text = _extract_plan_text_from_completion(completion, serialized)
-    if plan_text:
-        plan_logger.info(
-            "planner_structured_plan_body plan_id=%s attempt=%s stage=%s\n%s",
-            plan_id,
-            attempt_label,
-            stage,
-            _format_plan_text(plan_text),
-        )
-
-
-def _extract_plan_text_from_completion(completion: Any, serialized: Optional[str]) -> Optional[str]:
-    candidates: List[Any] = []
-    if completion is not None:
-        model_dump = getattr(completion, "model_dump", None)
-        if callable(model_dump):
-            try:
-                candidates.append(model_dump())
-            except Exception:  # pragma: no cover - best effort
-                pass
-        dict_attr = getattr(completion, "__dict__", None)
-        if isinstance(dict_attr, dict):
-            candidates.append(dict(dict_attr))
-    if serialized:
-        try:
-            candidates.append(json.loads(serialized))
-        except json.JSONDecodeError:
-            pass
-    candidates.append(completion)
-
-    for candidate in candidates:
-        text = _extract_plan_text(candidate)
-        if text:
-            return text
-    return None
+    if isinstance(value, list):
+        normalized = [str(item).strip() for item in value if str(item).strip()]
+        if not normalized:
+            return None
+        return "\n\n".join(normalized)
+    text = str(value).strip()
+    return text or None
 
 
 def _extract_plan_text(payload: Any) -> Optional[str]:
@@ -454,38 +262,49 @@ def _extract_plan_text(payload: Any) -> Optional[str]:
     return None
 
 
-def _extract_plan_from_dict(payload: Dict[str, Any]) -> Optional[str]:
-    tool_payload = payload.get(_PLANNER_TOOL_NAME)
-    if isinstance(tool_payload, dict):
-        rendered = _render_java_from_structured_payload(tool_payload)
-        if rendered:
-            return rendered
-    elif isinstance(tool_payload, str) and tool_payload.strip():
-        decoded = _decode_plan_string(tool_payload)
-        if isinstance(decoded, dict):
-            rendered = _render_java_from_structured_payload(decoded)
-            if rendered:
-                return rendered
-        elif isinstance(decoded, str) and decoded.strip():
-            return decoded.strip()
-
-    ast_rendered = _render_java_from_structured_payload(payload)
-    if ast_rendered:
-        return ast_rendered
+def _extract_java_string(payload: Dict[str, Any]) -> Optional[str]:
     for key in ("java", "java_code", "code", "source"):
         value = payload.get(key)
         if isinstance(value, str) and value.strip():
             decoded = _decode_plan_string(value)
-            if isinstance(decoded, str) and decoded.strip():
-                return decoded.strip()
+            if isinstance(decoded, str):
+                stripped = decoded.strip()
+                if stripped:
+                    return stripped
+    return None
+
+
+def _extract_plan_from_dict(payload: Dict[str, Any]) -> Optional[str]:
+    direct_java = _extract_java_string(payload)
+    if direct_java:
+        return direct_java
+
+    tool_payload = payload.get(_PLANNER_TOOL_NAME)
+    if isinstance(tool_payload, dict):
+        embedded = _extract_java_string(tool_payload)
+        if embedded:
+            return embedded
+    elif isinstance(tool_payload, str) and tool_payload.strip():
+        decoded = _decode_plan_string(tool_payload)
+        if isinstance(decoded, dict):
+            embedded = _extract_java_string(decoded)
+            if embedded:
+                return embedded
+        elif isinstance(decoded, str) and decoded.strip():
+            return decoded.strip()
+
     defines_block = payload.get("defines")
     if isinstance(defines_block, dict):
-        for candidate in ("java", "java_code", "code", "source"):
-            candidate_value = defines_block.get(candidate)
-            if isinstance(candidate_value, str) and candidate_value.strip():
-                decoded = _decode_plan_string(candidate_value)
-                if isinstance(decoded, str) and decoded.strip():
-                    return decoded.strip()
+        defined_java = _extract_java_string(defines_block)
+        if defined_java:
+            return defined_java
+
+    for key in ("choices", "message", "messages", "delta", "output"):
+        value = payload.get(key)
+        text = _extract_plan_text(value)
+        if text:
+            return text
+
     message = payload.get("message")
     if isinstance(message, dict):
         content = message.get("content")
@@ -493,157 +312,8 @@ def _extract_plan_from_dict(payload: Dict[str, Any]) -> Optional[str]:
             parsed = _parse_plan_content_string(content)
             if parsed:
                 return parsed
+
     return None
-
-
-def _render_java_from_structured_payload(payload: Dict[str, Any]) -> Optional[str]:
-    if not isinstance(payload, dict):
-        return None
-    main_statements = _collect_statement_lines(payload.get("main"))
-    if not main_statements:
-        main_statements = _collect_statement_lines(payload.get("statements"))
-    helper_blocks = _render_helper_blocks(payload.get("helpers") or payload.get("methods"))
-    if not main_statements and not helper_blocks:
-        return None
-
-    class_name = str(payload.get("name") or "Planner").strip() or "Planner"
-    package_decl = str(payload.get("package") or "").strip()
-    imports = _normalize_import_entries(payload.get("imports") or payload.get("import"))
-
-    lines: List[str] = []
-    if package_decl:
-        package_line = package_decl
-        if not package_line.startswith("package "):
-            package_line = f"package {package_line}"
-        if not package_line.endswith(";"):
-            package_line = f"{package_line};"
-        lines.append(package_line)
-        lines.append("")
-
-    if imports:
-        lines.extend(imports)
-        lines.append("")
-
-    lines.append(f"public class {class_name} {{")
-    if main_statements:
-        lines.append("    public static void main(String[] args) throws Exception {")
-        for stmt in main_statements:
-            lines.append(f"        {stmt}")
-        lines.append("    }")
-    else:
-        lines.append("    public static void main(String[] args) throws Exception {")
-        lines.append("        // TODO: implement main body")
-        lines.append("    }")
-
-    if helper_blocks:
-        lines.extend(helper_blocks)
-
-    lines.append("}")
-    return "\n".join(line for line in lines if line is not None).strip()
-
-
-def _collect_statement_lines(source: Any) -> List[str]:
-    if source is None:
-        return []
-    if isinstance(source, str):
-        text = source.strip()
-        return [text] if text else []
-    if isinstance(source, dict):
-        for key in ("statements", "body", "lines"):
-            if key in source:
-                return _collect_statement_lines(source[key])
-        fallback = source.get("statement") or source.get("code")
-        if fallback:
-            return _collect_statement_lines(fallback)
-        return []
-    if isinstance(source, Iterable) and not isinstance(source, (bytes, bytearray)):
-        lines: List[str] = []
-        for item in source:
-            lines.extend(_collect_statement_lines(item))
-        return lines
-    return []
-
-
-def _normalize_import_entries(entries: Any) -> List[str]:
-    if entries is None:
-        return []
-    if isinstance(entries, str):
-        entries = [entries]
-    normalized: List[str] = []
-    for raw in entries or []:
-        text = str(raw).strip()
-        if not text:
-            continue
-        if text.startswith("package "):
-            continue
-        if not text.startswith("import "):
-            text = f"import {text}"
-        if not text.endswith(";"):
-            text = f"{text};"
-        if text not in normalized:
-            normalized.append(text)
-    return normalized
-
-
-def _render_helper_blocks(entries: Any) -> List[str]:
-    if not entries:
-        return []
-    if isinstance(entries, dict):
-        iterable: Iterable[Any] = [entries]
-    elif isinstance(entries, Iterable) and not isinstance(entries, (bytes, bytearray, str)):
-        iterable = entries
-    else:
-        return []
-
-    blocks: List[str] = []
-    helper_index = 1
-    for entry in iterable:
-        if isinstance(entry, str):
-            body = entry.strip()
-            if not body:
-                continue
-            blocks.extend(["", f"    {body}"])
-            continue
-        if not isinstance(entry, dict):
-            continue
-        name = str(entry.get("name") or f"helper{helper_index}").strip() or f"helper{helper_index}"
-        helper_index += 1
-        return_type = str(entry.get("return_type") or "void").strip() or "void"
-        visibility = str(entry.get("visibility") or "private static").strip() or "private static"
-        params = _format_helper_parameters(entry.get("parameters"))
-        statements = _collect_statement_lines(entry)
-        if not statements:
-            statements = ["// TODO: implement"]
-        blocks.append("")
-        blocks.append(f"    {visibility} {return_type} {name}({params}) throws Exception {{")
-        for stmt in statements:
-            blocks.append(f"        {stmt}")
-        blocks.append("    }")
-    return blocks
-
-
-def _format_helper_parameters(parameters: Any) -> str:
-    if parameters is None:
-        return ""
-    if isinstance(parameters, str):
-        return parameters.strip()
-    if isinstance(parameters, dict):
-        type_hint = parameters.get("type") or "Object"
-        name = parameters.get("name") or "arg0"
-        return f"{type_hint} {name}"
-    if isinstance(parameters, Iterable):
-        parts: List[str] = []
-        for idx, entry in enumerate(parameters):
-            if isinstance(entry, dict):
-                entry_type = entry.get("type") or "Object"
-                entry_name = entry.get("name") or f"arg{idx}"
-                parts.append(f"{entry_type} {entry_name}")
-            else:
-                text = str(entry).strip()
-                if text:
-                    parts.append(text)
-        return ", ".join(parts)
-    return ""
 
 
 def _decode_plan_string(value: str) -> Any:
@@ -701,47 +371,6 @@ def _best_effort_unescape_literals(text: str) -> str:
         return mapping.get(token, match.group(0))
 
     return _ESCAPE_SEQUENCE_PATTERN.sub(_replace, text)
-
-
-def _format_plan_text(text: str) -> str:
-    normalized = text.strip()
-    if "\n" in normalized:
-        return normalized
-    tokens = re.split(r"(\{|\}|;)", normalized)
-    indent = 0
-    lines: List[str] = []
-    buffer: List[str] = []
-
-    def flush_buffer() -> None:
-        if buffer:
-            line = "".join(buffer).strip()
-            if line:
-                lines.append((" " * 4 * indent) + line)
-            buffer.clear()
-
-    for token in tokens:
-        if token is None:
-            continue
-        stripped = token.strip()
-        if not stripped:
-            continue
-        if stripped == ";":
-            buffer.append(";")
-            flush_buffer()
-        elif stripped == "{":
-            flush_buffer()
-            lines.append((" " * 4 * indent) + "{")
-            indent += 1
-        elif stripped == "}":
-            flush_buffer()
-            indent = max(indent - 1, 0)
-            lines.append((" " * 4 * indent) + "}")
-        else:
-            if buffer and not buffer[-1].endswith(" "):
-                buffer.append(" ")
-            buffer.append(stripped)
-    flush_buffer()
-    return "\n".join(lines)
 
 
 def _stringify_message_content(content: Any) -> str:
@@ -870,7 +499,7 @@ class JavaPlanRequest:
 
 @dataclass
 class JavaPlanResult:
-    """Structured result returned by :class:`JavaPlanner`."""
+    """Result returned by :class:`JavaPlanner`."""
 
     plan_id: str
     plan_source: str
@@ -878,74 +507,6 @@ class JavaPlanResult:
     prompt_messages: List[Dict[str, Any]]
     metadata: Dict[str, Any] = field(default_factory=dict)
     prompt_hash: Optional[str] = None
-
-
-class _PlannerToolPayload(BaseModel):
-    model_config = ConfigDict(extra="allow")
-
-    @model_validator(mode="before")
-    @classmethod
-    def _coerce_plain_java(cls, value: Any) -> Any:  # noqa: ANN401 - pydantic hook
-        if isinstance(value, str):
-            decoded = _decode_plan_string(value)
-            if isinstance(decoded, dict):
-                ast_rendered = _render_java_from_structured_payload(decoded)
-                if ast_rendered:
-                    coerced = dict(decoded)
-                    coerced["java"] = ast_rendered
-                    return coerced
-                extracted = _extract_plan_text(decoded)
-                if extracted:
-                    coerced = dict(decoded)
-                    coerced["java"] = extracted
-                    return coerced
-            elif isinstance(decoded, str):
-                value = decoded
-            return {"java": value}
-        if isinstance(value, dict):
-            ast_rendered = _render_java_from_structured_payload(value)
-            if ast_rendered:
-                coerced = dict(value)
-                coerced["java"] = ast_rendered
-                return coerced
-            java_value = value.get("java")
-            if isinstance(java_value, str) and java_value.strip():
-                return value
-            extracted = _extract_plan_text(value)
-            if extracted:
-                coerced = dict(value)
-                coerced["java"] = extracted
-                return coerced
-        return value
-
-    notes: Optional[str] = Field(
-        default=None,
-        description="Optional commentary about assumptions, risks, or TODOs.",
-    )
-    java: str = Field(
-        ..., description="Complete Java source code containing exactly one top-level class."
-    )
-
-    @field_validator("java")
-    @classmethod
-    def _ensure_plan_block(cls, value: str) -> str:
-        try:
-            return _normalize_java_source(value)
-        except ValueError as exc:  # pragma: no cover - validated downstream
-            raise ValueError(str(exc)) from exc
-
-    @field_validator("notes", mode="before")
-    @classmethod
-    def _normalize_notes(cls, value: Optional[Any]) -> Optional[str]:
-        if value is None:
-            return None
-        if isinstance(value, list):
-            normalized = [str(item).strip() for item in value if str(item).strip()]
-            if not normalized:
-                return None
-            return "\n\n".join(normalized)
-        return str(value)
-
 
 class JavaPlanner:
     """High-level helper that asks the LLM to emit a Java plan."""
@@ -956,8 +517,6 @@ class JavaPlanner:
         *,
         specification: Optional[str] = None,
         specification_path: Optional[Path] = None,
-        structured_max_retries: Optional[int] = None,
-        structured_enabled: Optional[bool] = None,
     ):
         self._llm_client = llm_client
         self._specification = self._load_specification(specification, specification_path)
@@ -966,66 +525,7 @@ class JavaPlanner:
             "type": "function",
             "function": {"name": _PLANNER_TOOL_NAME},
         }
-        self._structured_enabled = self._resolve_structured_enabled(structured_enabled)
-        self._structured_max_retries = (
-            self._resolve_structured_retry_limit(structured_max_retries)
-            if self._structured_enabled
-            else 0
-        )
         
-    def _resolve_structured_enabled(self, explicit: Optional[bool]) -> bool:
-        if explicit is not None:
-            return bool(explicit)
-        disable_raw = os.getenv(_STRUCTURED_DISABLED_ENV)
-        enable_raw = os.getenv(_STRUCTURED_ENABLE_ENV)
-
-        if disable_raw is not None and _is_truthy(disable_raw):
-            if enable_raw:
-                logger.warning(
-                    "Both %s and %s are set; structured planner will remain disabled.",
-                    _STRUCTURED_ENABLE_ENV,
-                    _STRUCTURED_DISABLED_ENV,
-                )
-            return False
-
-        if enable_raw is not None:
-            enabled = _is_truthy(enable_raw)
-            if enabled:
-                logger.info("Structured planner enabled via %s", _STRUCTURED_ENABLE_ENV)
-            else:
-                logger.info("Structured planner explicitly disabled via %s", _STRUCTURED_ENABLE_ENV)
-            return enabled
-
-        logger.info(
-            "Structured planner defaulting to disabled. Set %s=1 or pass structured_enabled=True to enable.",
-            _STRUCTURED_ENABLE_ENV,
-        )
-        return False
-
-    def _resolve_structured_retry_limit(self, explicit: Optional[int]) -> int:
-        if explicit is not None:
-            value = explicit
-        else:
-            env_limit = _read_structured_retry_limit()
-            if env_limit is not None:
-                value = env_limit
-            else:
-                provider_limit = (
-                    getattr(self._llm_client.provider, "max_retries", None)
-                    or getattr(self._llm_client.provider, "default_retries", None)
-                )
-                if provider_limit is None or provider_limit <= 0:
-                    value = 2
-                    logger.info(
-                        "Planner structured retries defaulting to %s attempts (provider did not specify)",
-                        value,
-                    )
-                else:
-                    value = provider_limit
-        if value < 0:
-            raise ValueError("structured_max_retries must be >= 0")
-        return value
-
     def generate_plan(self, request: JavaPlanRequest) -> JavaPlanResult:
         messages = self._build_messages(request)
         plan_source: str
@@ -1033,121 +533,46 @@ class JavaPlanner:
         notes: Optional[str] = None
         plan_id = str(request.metadata.get("plan_id") or uuid.uuid4())
         request_start = time.perf_counter()
-        retries = self._structured_max_retries
         status_prefix = "[JavaPlanner]"
-        if self._structured_enabled:
-            print(
-                f"{status_prefix} Requesting structured Java plan (tools={request.tool_names or ['none']}, retries={retries})",
-                flush=True,
-            )
-            logger.info(
-                "%s Requesting structured Java plan (tools=%s, retries=%s)",
-                status_prefix,
-                request.tool_names or ["none"],
-                retries,
-            )
-        else:
-            print(
-                f"{status_prefix} Structured planner disabled; using plain-text generation.",
-                flush=True,
-            )
-            logger.info("%s Structured planner disabled via configuration; using plain-text generation.", status_prefix)
+        print(
+            f"{status_prefix} Generating Java plan via plain-text mode (tools={request.tool_names or ['none']}).",
+            flush=True,
+        )
+        logger.info(
+            "%s Generating Java plan via plain-text mode (tools=%s)",
+            status_prefix,
+            request.tool_names or ["none"],
+        )
         plan_logger.info(
-            "planner_request plan_id=%s tools=%s retries=%s context=%s structured=%s",
+            "planner_request plan_id=%s tools=%s context=%s generation_mode=plain",
             plan_id,
             request.tool_names or ["none"],
-            retries,
             bool(request.context),
-            self._structured_enabled,
         )
         prompt_hash = _compute_prompt_hash(messages)
         _log_llm_request(plan_id, messages, request)
-        if self._structured_enabled:
-            try:
-                payload = self._llm_client.structured_generate(
-                    messages=messages,
-                    response_model=_PlannerToolPayload,
-                    tools=[self._planner_tool_schema],
-                    tool_choice=self._planner_tool_choice,
-                    max_retries=self._structured_max_retries,
-                    log_context={
-                        "logger_name": PLAN_LOGGER_NAME,
-                        "prefix": f"plan_id={plan_id}",
-                        "completion_logger": lambda attempt, completion: _log_structured_attempt_completion(
-                            plan_id,
-                            attempt,
-                            completion,
-                        ),
-                    },
-                )
-            except Exception as exc:  # pragma: no cover - provider dependent
-                elapsed = time.perf_counter() - request_start
-                print(
-                    f"{status_prefix} Structured plan request failed after {elapsed:.1f}s: {exc}",
-                    flush=True,
-                )
-                logger.warning(
-                    "%s Structured plan request failed after %.1fs: %s",
-                    status_prefix,
-                    elapsed,
-                    exc,
-                )
-                plan_logger.warning(
-                    "planner_structured_failure plan_id=%s elapsed=%.1fs error=%s",
-                    plan_id,
-                    elapsed,
-                    exc,
-                )
-                _log_structured_failure_details(plan_id, exc)
-                friendly = _summarize_structured_failure(exc)
-                if friendly:
-                    logger.warning("%s Falling back to plain-text parsing.", friendly)
-                    plan_logger.warning(
-                        "planner_structured_reason plan_id=%s detail=%s",
-                        plan_id,
-                        friendly,
-                    )
-                else:
-                    logger.warning(
-                        "Structured Java plan generation failed; attempting plain-text fallback.",
-                        exc_info=exc,
-                    )
-                plan_logger.info("planner_plain_fallback plan_id=%s", plan_id)
-                failure_reason = friendly or str(exc)
-                plan_source, raw_response, notes = self._generate_plain_plan(
-                    messages,
-                    plan_id=plan_id,
-                    failure_reason=failure_reason,
-                )
-            else:
-                elapsed = time.perf_counter() - request_start
-                print(
-                    f"{status_prefix} Structured plan ready in {elapsed:.1f}s (notes={bool(payload.notes)})",
-                    flush=True,
-                )
-                logger.info(
-                    "%s Structured plan ready in %.1fs (notes=%s)",
-                    status_prefix,
-                    elapsed,
-                    bool(payload.notes),
-                )
-                plan_logger.info(
-                    "planner_structured_success plan_id=%s elapsed=%.1fs notes=%s",
-                    plan_id,
-                    elapsed,
-                    bool(payload.notes),
-                )
-                plan_source = payload.java.strip()
-                raw_response = payload.model_dump()
-                if payload.notes:
-                    notes = payload.notes.strip()
-        else:
-            plan_logger.info("planner_plain_fallback plan_id=%s reason=structured_disabled", plan_id)
-            plan_source, raw_response, notes = self._generate_plain_plan(
-                messages,
-                plan_id=plan_id,
-                failure_reason="Structured planner disabled",
-            )
+        plan_source, raw_response, notes = self._generate_plain_plan(
+            request,
+            messages,
+            plan_id=plan_id,
+        )
+        elapsed = time.perf_counter() - request_start
+        print(
+            f"{status_prefix} Plain-text plan ready in {elapsed:.1f}s (notes={bool(notes)})",
+            flush=True,
+        )
+        logger.info(
+            "%s Plain-text plan ready in %.1fs (notes=%s)",
+            status_prefix,
+            elapsed,
+            bool(notes),
+        )
+        plan_logger.info(
+            "planner_plain_success plan_id=%s elapsed=%.1fs notes=%s",
+            plan_id,
+            elapsed,
+            bool(notes),
+        )
 
         metadata = dict(request.metadata)
         metadata.setdefault("allowed_tools", sorted(request.tool_names))
@@ -1173,14 +598,15 @@ class JavaPlanner:
 
     def _generate_plain_plan(
         self,
+        request: JavaPlanRequest,
         messages: List[Dict[str, Any]],
         *,
         plan_id: str,
         failure_reason: Optional[str] = None,
     ) -> Tuple[str, Dict[str, Any], Optional[str]]:
-        """Fallback path when structured tool calls are unavailable."""
+        """Generate a plan using repeated plain-text attempts."""
 
-        current_messages = self._build_plain_fallback_messages(messages, failure_reason)
+        current_messages = self._build_plain_fallback_messages(request, messages, failure_reason)
         attempts = _PLAIN_FALLBACK_MAX_ATTEMPTS
         last_error: Optional[JavaPlanningError] = None
 
@@ -1210,6 +636,7 @@ class JavaPlanner:
                 if attempt == attempts:
                     break
                 current_messages = self._append_plain_retry_prompt(
+                    request,
                     current_messages,
                     failure_reason=str(exc),
                     attempt_label=attempt + 1,
@@ -1246,7 +673,7 @@ class JavaPlanner:
                     raise JavaPlanningError(f"Planner returned invalid Java: {exc}") from exc
                 raw_notes = payload_data.get("notes")
                 if raw_notes is not None:
-                    notes = _PlannerToolPayload._normalize_notes(raw_notes)
+                    notes = _normalize_planner_notes(raw_notes)
                 return normalized, response, notes
 
         content = response.get("content")
@@ -1260,10 +687,12 @@ class JavaPlanner:
 
     def _build_plain_fallback_messages(
         self,
+        request: JavaPlanRequest,
         base_messages: List[Dict[str, Any]],
         failure_reason: Optional[str],
     ) -> List[Dict[str, Any]]:
         prompt = self._format_plain_followup_prompt(
+            request,
             failure_reason,
             is_retry=False,
         )
@@ -1271,13 +700,14 @@ class JavaPlanner:
 
     def _append_plain_retry_prompt(
         self,
+        request: JavaPlanRequest,
         current_messages: List[Dict[str, Any]],
         *,
         failure_reason: Optional[str],
         attempt_label: int,
         plan_id: str,
     ) -> List[Dict[str, Any]]:
-        prompt = self._format_plain_followup_prompt(failure_reason, is_retry=True)
+        prompt = self._format_plain_followup_prompt(request, failure_reason, is_retry=True)
         plan_logger.info(
             "planner_plain_retry_prompt plan_id=%s attempt=%s reason=%s",
             plan_id,
@@ -1286,8 +716,9 @@ class JavaPlanner:
         )
         return list(current_messages) + [{"role": "user", "content": prompt}]
 
-    @staticmethod
     def _format_plain_followup_prompt(
+        self,
+        request: JavaPlanRequest,
         failure_reason: Optional[str],
         *,
         is_retry: bool,
@@ -1295,18 +726,53 @@ class JavaPlanner:
         truncated = ""
         if failure_reason:
             truncated = textwrap.shorten(failure_reason.strip(), width=280, placeholder="…")
-        if is_retry:
-            header = "Your prior response was empty or malformed; output the Java class verbatim below."
+        helper_focus = (request.metadata or {}).get("helper_focus") or {}
+        helper_name = helper_focus.get("function") if isinstance(helper_focus, dict) else None
+        helper_comment = helper_focus.get("comment") if isinstance(helper_focus, dict) else None
+        helper_message = helper_focus.get("message") if isinstance(helper_focus, dict) else None
+
+        if helper_name:
+            header = (
+                "Your prior response was empty or malformed; re-emit the complete Planner.java source but only"
+                if is_retry
+                else "Re-emit the complete Planner.java source but only"
+            )
+            header = f"{header} adjust the helper '{helper_name}'."
         else:
-            header = "Structured tool calls failed; output the Java class verbatim below."
-        instructions = (
-            "Return only the Java source for a single class named Planner, without JSON, markdown,"
-            " or commentary. Continue calling PlanningToolStubs.<toolName>(...) exactly as defined."
-        )
+            header = (
+                "Your prior response was empty or malformed; output the Java class verbatim below."
+                if is_retry
+                else "Output the Java class verbatim below."
+            )
+
+        sections: List[str] = [header]
         if truncated:
-            details = f"Previous error: {truncated}"
-            return "\n".join([header, details, instructions]).strip()
-        return "\n".join([header, instructions]).strip()
+            sections.append(f"Previous error: {truncated}")
+
+        raw_task = textwrap.dedent(request.task or "").strip()
+        if raw_task:
+            task_summary = textwrap.shorten(" ".join(raw_task.split()), width=320, placeholder="…")
+        else:
+            task_summary = "Fulfill the previously described task."
+
+        if helper_name:
+            sections.append(
+                "Keep main() and other helpers identical to the cached plan; rewrite only this helper unless a tiny"
+                " supporting helper is absolutely required."
+            )
+            sections.append(f"Task reminder: {task_summary}")
+            if helper_comment:
+                sections.append(f"Stub note: {helper_comment.strip()}")
+            if helper_message and helper_message.strip() != helper_comment:
+                sections.append(helper_message.strip())
+        else:
+            sections.append(f"Task reminder: {task_summary}")
+
+        sections.append(
+            "Return only the Java source for a single class named Planner, without JSON, markdown, or commentary."
+            " Continue calling PlanningToolStubs.<toolName>(...) exactly as defined."
+        )
+        return "\n".join(section for section in sections if section).strip()
 
     def _build_messages(self, request: JavaPlanRequest) -> List[Dict[str, Any]]:
         has_tools = bool(request.tool_stub_source)
@@ -1338,12 +804,12 @@ class JavaPlanner:
             " If the problem cannot be solved directly with the available tools, stub out the functions called with comments, indicating what they should do."
         )
         schema_guidance = textwrap.dedent(
-            """
-            When the runtime requests structured output, you must emit a single JSON object matching:
-            {
-              "java": "public class Plan { ... }",
+            f"""
+            When you finalize the plan, call the `{_PLANNER_TOOL_NAME}` function with a JSON object matching:
+            {{
+              "java": "public class Planner {{ ... }}",
               "notes": "Optional commentary about risks or TODOs (omit or null when unused)"
-            }
+            }}
             Do not introduce additional keys, arrays, or wrapper text around this object.
             """
         ).strip()

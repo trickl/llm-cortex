@@ -1,0 +1,94 @@
+--- a/Planner.java
++++ b/Planner.java
+@@ -1,3 +1,3 @@
+ import java.util.List;
+-import java.util.Map;
+ 
+ public class Planner {
+     public static void main(String[] args) {
+@@ -5,6 +5,7 @@
+         if (hasOpenIssues()) {
+             Map<String, Object> issue = getFirstIssue();
+             String repoPath = checkoutRepo((String) issue.get("repo"));
++            PlanningToolStubs.checkout_repo(repoPath);
+             String branchName = "fix-" + issue.get("id");
+             PlanningToolStubs.write_file(repoPath + "/" + branchName + ".java", generateFixCode(issue), "UTF-8");
+             PlanningToolStubs.run_command("git add " + repoPath + "/" + branchName + ".java");
+@@ -12,6 +13,7 @@
+         } else {
+             System.out.println("No open issues found.");
+         }
+     }
+
++    private static boolean hasOpenIssues() {
+         // Stub: Check if there are any open issues in Qlty.
+         Map<String, Object> issues = PlanningToolStubs.search_text_in_repository("qlty", "open", true, 1, false, List.of("issue"));
+         return !issues.isEmpty();
+     }
+
+@@ -20,6 +22,7 @@
+         // Stub: Get the first issue from Qlty.
+         return PlanningToolStubs.search_text_in_repository("qlty", "open", true, 1, false, List.of("issue"));
+     }
+
++    private static String checkoutRepo(String repoUrl) {
+         // Stub: Checkout the relevant GitHub repository.
+-        PlanningToolStubs.run_command("git clone " + repoUrl);
+-        return repoUrl.split("/")[4];
++        PlanningToolStubs.checkout_repo(repoUrl);
++        return repoUrl;
+     }
+
+@@ -28,6 +31,7 @@
+         // Placeholder for code generation logic based on the issue.
+         return "public class Fix { public void fix() {} }";
+     }
++
+ }
+--- a/PlanningToolStubs.java
++++ b/PlanningToolStubs.java
+@@ -50,6 +50,24 @@ public final class PlanningToolStubs {
+     }
+
+     /**
++     * Checkout the relevant GitHub repository.
++     *
++     * @param repoUrl The URL of the repository to checkout.
++     */
++    public static void checkout_repo(String repoUrl) {
++        Object[] args = new Object[]{repoUrl};
++        Object __result = PlanningToolRuntime.invoke("checkout_repo", args);
++    }
++
++    /**
++     * Write content to a specified file (relative to project root).
++     *
++     * @param file_path The path of the file to write.
++     * @param content The content to write.
++     * @param mode The mode for writing the file.
++     */
++    public static void write_file(String file_path, String content, String mode) {
++        Object[] args = new Object[]{file_path, content, mode};
++        Object __result = PlanningToolRuntime.invoke("write_file", args);
++    }
++
++    /**
+      * Search for a text token within files under a repository-relative directory.
+      *
+      * @param search_root The root directory to search in the repository.
+@@ -104,6 +122,7 @@ public final class PlanningToolStubs {
+     }
+
+     /**
++     * Write content to file with advanced features like format detection, backup and atomic writes.
+      * @param file_path The path of the file to write.
+      * @param content The content to write.
+      * @param format_hint A hint for the format of the content.
+@@ -120,6 +139,7 @@ public final class PlanningToolStubs {
+     }
+
+     /**
++     * Convert file between formats (e.g., CSV to JSON, XML to YAML, etc.)
+      * @param input_path The path of the input file.
+      * @param output_path The path of the output file.
+      * @param target_format The format to convert the file to.

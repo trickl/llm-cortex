@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 from pydantic import BaseModel, Field
+from diff_match_patch import diff_match_patch
 
 from llmflow.logging_utils import LLM_LOGGER_NAME, PLAN_LOGGER_NAME
 
@@ -48,6 +49,10 @@ _DIAGNOSTIC_PATTERNS = (
     re.compile(r"\.java:\d+:\s*(error|warning|note|symbol|location)\b", re.IGNORECASE),
 )
 _SKIPPED_PATCH_LOG = "patch_skipped.log"
+_METHOD_DECL_PATTERN = re.compile(
+    r"^\s*(public|protected|private)?\s*(static\s+)?[\w\<\>\[\]]+\s+[A-Za-z_][A-Za-z0-9_]*\s*\([^;]*\)\s*(?:throws\s+[A-Za-z0-9_,\s.]+)?\s*\{?\s*$"
+)
+_CLASS_DECL_PATTERN = re.compile(r"^\s*(public\s+)?(class|interface|enum)\b")
 
 
 @dataclass
@@ -331,7 +336,11 @@ class JavaPlanFixer:
         llm_logger = self._get_llm_logger()
         plan_filename = self._plan_file_basename(plan_source)
         allowed_files = {plan_filename}
-        line_windows = self._build_error_windows(compile_errors, plan_filename)
+        line_windows = self._build_error_windows(
+            compile_errors,
+            plan_filename,
+            plan_source,
+        )
         skip_callback = lambda reason: self._record_patch_skip(iteration_dir, reason)
         last_error: Optional[Exception] = None
         for request_attempt in range(1, self._max_fix_request_attempts + 1):
@@ -560,17 +569,100 @@ class JavaPlanFixer:
         self,
         errors: Sequence[CompilationError],
         plan_filename: str,
+        plan_source: Optional[str] = None,
     ) -> List[Tuple[int, int]]:
         windows: List[Tuple[int, int]] = []
+        plan_lines: Optional[List[str]] = None
+        if plan_source:
+            normalized = self._normalize_patch_text(plan_source)
+            plan_lines = normalized.splitlines()
         for error in errors:
             if error.file and Path(error.file).name != plan_filename:
                 continue
             if error.line is None:
                 continue
-            start = max(1, int(error.line) - _ERROR_LINE_WINDOW)
-            end = int(error.line) + _ERROR_LINE_WINDOW
+            line_number = int(error.line)
+            start = max(1, line_number - _ERROR_LINE_WINDOW)
+            end = line_number + _ERROR_LINE_WINDOW
             windows.append((start, end))
-        return windows
+            if plan_lines:
+                method_window = self._method_window_for_line(plan_lines, line_number)
+                if method_window:
+                    windows.append(method_window)
+        merged = self._merge_windows(windows)
+        if merged:
+            return merged
+        if plan_lines:
+            total_lines = len(plan_lines)
+            if total_lines:
+                return [(1, total_lines)]
+        return []
+
+    @staticmethod
+    def _merge_windows(windows: Sequence[Tuple[int, int]]) -> List[Tuple[int, int]]:
+        if not windows:
+            return []
+        ordered = sorted((max(1, start), max(start, end)) for start, end in windows)
+        merged: List[Tuple[int, int]] = [ordered[0]]
+        for start, end in ordered[1:]:
+            last_start, last_end = merged[-1]
+            if start <= last_end + 1:
+                merged[-1] = (last_start, max(last_end, end))
+            else:
+                merged.append((start, end))
+        return merged
+
+    def _method_window_for_line(
+        self,
+        plan_lines: Sequence[str],
+        line_number: int,
+    ) -> Optional[Tuple[int, int]]:
+        if line_number < 1 or line_number > len(plan_lines):
+            return None
+        signature_idx = self._locate_method_signature(plan_lines, line_number - 1)
+        if signature_idx is None:
+            return None
+        block_start = self._locate_block_start(plan_lines, signature_idx)
+        if block_start is None:
+            return None
+        block_end = self._locate_block_end(plan_lines, block_start)
+        if block_end is None:
+            return None
+        return signature_idx + 1, block_end + 1
+
+    @staticmethod
+    def _locate_method_signature(plan_lines: Sequence[str], start_index: int) -> Optional[int]:
+        idx = min(start_index, len(plan_lines) - 1)
+        while idx >= 0:
+            line = plan_lines[idx].strip()
+            if not line or line.startswith("//"):
+                idx -= 1
+                continue
+            if line.startswith("@"):
+                idx -= 1
+                continue
+            if _METHOD_DECL_PATTERN.match(line) or _CLASS_DECL_PATTERN.match(line):
+                return idx
+            idx -= 1
+        return None
+
+    @staticmethod
+    def _locate_block_start(plan_lines: Sequence[str], signature_index: int) -> Optional[int]:
+        for idx in range(signature_index, len(plan_lines)):
+            if "{" in plan_lines[idx]:
+                return idx
+        return None
+
+    @staticmethod
+    def _locate_block_end(plan_lines: Sequence[str], block_start: int) -> Optional[int]:
+        depth = 0
+        for idx in range(block_start, len(plan_lines)):
+            line = plan_lines[idx]
+            depth += line.count("{")
+            depth -= line.count("}")
+            if depth <= 0:
+                return idx
+        return len(plan_lines) - 1 if plan_lines else None
 
     def _record_patch_skip(self, iteration_dir: Path, reason: str) -> None:
         clean_reason = reason.strip()
@@ -586,9 +678,34 @@ class JavaPlanFixer:
     @staticmethod
     def _apply_contextual_patches(plan_source: str, patches: Sequence[_ContextPatch]) -> str:
         updated = plan_source.replace("\r\n", "\n").replace("\r", "\n")
-        for patch in patches:
-            updated = JavaPlanFixer._apply_single_patch(updated, patch)
+        import logging
+
+        logger = logging.getLogger(PLAN_LOGGER_NAME)
+        for index, patch in enumerate(patches, start=1):
+            try:
+                updated = JavaPlanFixer._apply_single_patch(updated, patch)
+            except ValueError as exc:
+                context_summary = JavaPlanFixer._summarize_patch_context(patch)
+                logger.error(
+                    "plan_fixer_patch_apply_failed patch_index=%s context=%s error=%s",
+                    index,
+                    context_summary,
+                    exc,
+                )
+                raise ValueError(
+                    f"Failed to apply contextual patch #{index}: {exc}"
+                ) from exc
         return updated
+
+    @staticmethod
+    def _summarize_patch_context(patch: _ContextPatch, limit: int = 160) -> str:
+        def _clip(value: str) -> str:
+            normalized = (value or "").strip().replace("\n", "\\n")
+            if len(normalized) > limit:
+                return normalized[:limit] + "…"
+            return normalized or "<empty>"
+
+        return f"before={_clip(patch.before_context)} after={_clip(patch.after_context)}"
 
     @staticmethod
     def _apply_single_patch(plan_source: str, patch: _ContextPatch) -> str:
@@ -607,13 +724,29 @@ class JavaPlanFixer:
     @staticmethod
     def _locate_patch_window(plan_source: str, before: str, after: str) -> Tuple[int, int, int]:
         normalized = plan_source
-        before_starts = JavaPlanFixer._context_start_indices(normalized, before)
-        if not before_starts:
+        before_entries: List[Tuple[int, int]] = [
+            (idx, len(before)) for idx in JavaPlanFixer._context_start_indices(normalized, before)
+        ]
+        if not before_entries:
             if before:
-                raise ValueError("Failed to locate before_context in plan source.")
-            before_starts = [0]
-        for before_start in before_starts:
-            between_start = before_start + len(before)
+                approx = JavaPlanFixer._approximate_context_index(normalized, before, 0)
+                if approx is None and after:
+                    after_idx = JavaPlanFixer._find_with_newline_fallback(normalized, after, 0)
+                    if after_idx != -1:
+                        before_entries = [(after_idx, 0)]
+                if approx is None and not before_entries:
+                    raise ValueError("Failed to locate before_context in plan source.")
+                if approx is not None:
+                    approx_start, approx_len = approx
+                    if before and len(before) > 0:
+                        coverage = approx_len / max(len(before), 1)
+                        if coverage < 0.5:
+                            approx_len = 0
+                    before_entries = [(approx_start, approx_len)]
+            else:
+                before_entries = [(0, 0)]
+        for before_start, matched_len in before_entries:
+            between_start = before_start + matched_len
             if after:
                 after_start = JavaPlanFixer._find_with_newline_fallback(
                     normalized,
@@ -636,10 +769,13 @@ class JavaPlanFixer:
                 variants.append(trimmed)
         for variant in variants:
             if not variant:
-                continue
+                return start
             idx = haystack.find(variant, start)
             if idx != -1:
                 return idx
+        approx = JavaPlanFixer._approximate_context_index(haystack, needle, start)
+        if approx is not None:
+            return approx[0]
         return -1
 
     @staticmethod
@@ -655,6 +791,78 @@ class JavaPlanFixer:
             indices.append(idx)
             start = idx + 1
         return indices
+
+    @staticmethod
+    def _approximate_context_index(haystack: str, needle: str, hint: int) -> Optional[Tuple[int, int]]:
+        if not needle.strip():
+            return hint, 0
+        matcher = diff_match_patch()
+        matcher.Match_Distance = max(1024, len(haystack))
+        matcher.Match_Threshold = 0.35
+        candidates = JavaPlanFixer._approximate_candidates(needle)
+        search_start = max(0, hint)
+        for candidate in candidates:
+            if not candidate:
+                continue
+            location = matcher.match_main(haystack, candidate, search_start)
+            if location == -1:
+                continue
+            matched_len = JavaPlanFixer._match_suffix_length(haystack, needle, location)
+            if matched_len <= 0:
+                matched_len = min(len(candidate), len(haystack) - location)
+            if matched_len > 0:
+                return location, matched_len
+        return None
+
+    @staticmethod
+    def _approximate_candidates(needle: str) -> List[str]:
+        normalized = needle.replace("\r\n", "\n").replace("\r", "\n")
+        stripped = normalized.strip("\n")
+        base = stripped or normalized
+        candidates: List[str] = []
+        seen: Set[str] = set()
+
+        def _add(value: str) -> None:
+            if not value:
+                return
+            if value in seen:
+                return
+            seen.add(value)
+            candidates.append(value)
+
+        _add(base)
+        if base != normalized:
+            _add(normalized)
+        chunk = 256
+        if len(base) > chunk:
+            _add(base[-chunk:])
+            _add(base[:chunk])
+        lines = [line for line in base.splitlines() if line.strip()]
+        if lines:
+            _add(lines[-1])
+            _add(lines[0])
+        return candidates
+
+    @staticmethod
+    def _match_suffix_length(haystack: str, needle: str, location: int) -> int:
+        if not needle:
+            return 0
+        available = len(haystack) - location
+        if available <= 0:
+            return 0
+        for offset in range(len(needle)):
+            suffix = needle[offset:]
+            if not suffix:
+                continue
+            if len(suffix) > available:
+                continue
+            if haystack.startswith(suffix, location):
+                return len(suffix)
+        matched = 0
+        limit = min(len(needle), available)
+        while matched < limit and haystack[location + matched] == needle[matched]:
+            matched += 1
+        return matched
 
     @staticmethod
     def _normalize_patch_text(value: str) -> str:
@@ -769,6 +977,7 @@ class JavaPlanFixer:
 
     def _split_unified_diff_sections(self, text: str) -> List[str]:
         normalized = self._normalize_patch_text(text.strip())
+        normalized = self._strip_code_fence_wrapper(normalized)
         if not normalized:
             return []
         lines = normalized.splitlines()
@@ -787,6 +996,25 @@ class JavaPlanFixer:
         if current:
             sections.append("\n".join(current).strip())
         return sections
+
+    @staticmethod
+    def _strip_code_fence_wrapper(text: str) -> str:
+        stripped = text.strip()
+        if not stripped.startswith("```"):
+            return stripped
+        lines = stripped.splitlines()
+        if not lines:
+            return stripped
+        opener = lines[0].strip()
+        if not opener.startswith("```"):
+            return stripped
+        closing_index = None
+        for idx in range(len(lines) - 1, 0, -1):
+            if lines[idx].strip() == "```":
+                closing_index = idx
+                break
+        body_lines = lines[1:closing_index] if closing_index is not None else lines[1:]
+        return "\n".join(body_lines).strip()
 
     @staticmethod
     def _is_diagnostic_annotation(line: str) -> bool:

@@ -1,0 +1,28 @@
+--- a/Planner.java
++++ b/Planner.java
+@@ -1,5 +1,7 @@
+ import java.util.List;
++import java.util.Map;
+ 
+ public class Planner {
+     public static void main(String[] args) {
+         processIssues();
+     }
+@@ -7,6 +9,8 @@
+     private static List<Map<String, Object>> fetchOpenIssuesFromQlty() {
+         // Stub: Fetch open issues from the Qlty API.
+         return PlanningToolStubs.search_text_in_repository("qlty/issues", "open", false, null, false, List.of(".json"));
++    }
++
+     private static String checkoutCodeFromGitHub(Map<String, Object> issue) {
+         // Stub: Check out the relevant code from GitHub.
+         String repoUrl = (String) issue.get("repo_url");
+@@ -12,6 +14,8 @@
+     private static String createBranch(String repoPath, Map<String, Object> issue) {
+         // Stub: Create a unique branch to address the issue.
+         String issueId = (String) issue.get("id");
++    }
++
+     private static void diagnoseAndFixIssue(String repoPath, String branchName, Map<String, Object> issue) {
+         // Stub: Diagnose the root cause of the issue and propose code changes.
+         String filePath = (String) issue.get("file_path");
