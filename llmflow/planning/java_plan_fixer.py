@@ -34,7 +34,6 @@ _PLAN_CLASS_PATTERN = re.compile(r"(?:class|interface)\s+(?P<name>[A-Za-z_][A-Za
 _HUNK_HEADER_PATTERN = re.compile(
     r"@@ -(?P<old_start>\d+)(?:,(?P<old_count>\d+))? \+(?P<new_start>\d+)(?:,(?P<new_count>\d+))? @@"
 )
-_ERROR_LINE_WINDOW = 5
 _DIAGNOSTIC_PREFIXES = (
     "^",
     "symbol:",
@@ -48,12 +47,8 @@ _DIAGNOSTIC_PATTERNS = (
     re.compile(r"[A-Za-z0-9_./\\-]+\.(java|kt|scala):\d+:"),
     re.compile(r"\.java:\d+:\s*(error|warning|note|symbol|location)\b", re.IGNORECASE),
 )
+_DUPLICATE_CLASS_PATTERN = re.compile(r"\bduplicate\s+class\b", re.IGNORECASE)
 _SKIPPED_PATCH_LOG = "patch_skipped.log"
-_METHOD_DECL_PATTERN = re.compile(
-    r"^\s*(public|protected|private)?\s*(static\s+)?[\w\<\>\[\]]+\s+[A-Za-z_][A-Za-z0-9_]*\s*\([^;]*\)\s*(?:throws\s+[A-Za-z0-9_,\s.]+)?\s*\{?\s*$"
-)
-_CLASS_DECL_PATTERN = re.compile(r"^\s*(public\s+)?(class|interface|enum)\b")
-
 
 @dataclass
 class _DiffSnippet:
@@ -239,6 +234,7 @@ class JavaPlanFixer:
             request.plan_id,
         )
         plan_source = request.plan_source
+        last_clean_plan_source = plan_source
         notes: List[str] = []
         plan_logger = self._get_plan_logger()
 
@@ -268,6 +264,21 @@ class JavaPlanFixer:
                     compile_result=compile_result,
                     notes=self._merge_notes(notes),
                 )
+            if self._contains_duplicate_class_error(compile_result.errors):
+                warning = (
+                    "Detected duplicate class definition, reverted to the last clean planner source before requesting another fix."
+                )
+                plan_logger.warning(
+                    "plan_fixer_duplicate_class plan_id=%s attempt=%s iteration=%s dir=%s",
+                    request.plan_id,
+                    attempt,
+                    iteration,
+                    iteration_dir,
+                )
+                plan_source = last_clean_plan_source
+                notes.append(warning)
+                continue
+            last_clean_plan_source = plan_source
             if iteration == self._max_iterations:
                 break
             plan_logger.info(
@@ -336,11 +347,6 @@ class JavaPlanFixer:
         llm_logger = self._get_llm_logger()
         plan_filename = self._plan_file_basename(plan_source)
         allowed_files = {plan_filename}
-        line_windows = self._build_error_windows(
-            compile_errors,
-            plan_filename,
-            plan_source,
-        )
         skip_callback = lambda reason: self._record_patch_skip(iteration_dir, reason)
         last_error: Optional[Exception] = None
         for request_attempt in range(1, self._max_fix_request_attempts + 1):
@@ -376,7 +382,6 @@ class JavaPlanFixer:
                         content,
                         plan_source,
                         allowed_filenames=allowed_files,
-                        line_windows=line_windows,
                         skip_callback=skip_callback,
                     )
                     return patches, notes, content
@@ -415,12 +420,14 @@ class JavaPlanFixer:
             for line in [
                 "You repair a single Java class that orchestrates planning tools.",
                 "Given the previous plan and the Java compiler diagnostics, produce localized contextual patches rather than rewriting the entire file.",
+                "Our patch tool already handles fuzzy matching and line-drift correction; emit unified diff hunks and rely on it to apply the changes.",
                 stub_clause,
                 f"Only edit {plan_filename}; never modify PlanningToolStubs.java or any other files, even if diagnostics mention them.",
                 "Address diagnostics sequentially and emit at most one focused hunk per compiler error (resolve them in the order provided).",
                 "Contexts must quote existing lines exactly as they already appear in the file (indentation, punctuation, and newline characters included). Never invent context from the desired replacement.",
                 "Always include at least two unchanged lines at the top and bottom of each patch whenever they exist (use fewer only at file boundaries). Keep those boundary lines identical to the current file; only the interior lines should change.",
                 "Preserve helper structure and minimize unrelated edits.",
+                "Do not rewrite the whole file—return only the minimal edits needed to fix the diagnostics.",
                 "If a method or helper does not exist (cannot find symbol on PlanningToolStubs class) add a stub method with the expected signature and a detailed comment describing its expected behavior.",
                 "Import any required Java packages when introducing new types.",
                 "Emit plain-text unified diffs only; do not wrap responses in markdown fences or commentary.",
@@ -496,6 +503,14 @@ class JavaPlanFixer:
         return line, column
 
     @staticmethod
+    def _contains_duplicate_class_error(errors: Sequence[CompilationError]) -> bool:
+        for error in errors:
+            payload = " ".join(part for part in (error.message, error.raw) if part)
+            if payload and _DUPLICATE_CLASS_PATTERN.search(payload):
+                return True
+        return False
+
+    @staticmethod
     def _format_errors(errors: Sequence[CompilationError]) -> str:
         if not errors:
             return "(Compiler produced no structured diagnostics; ensure the plan compiles.)"
@@ -540,129 +555,6 @@ class JavaPlanFixer:
         if not match:
             raise ValueError("Unable to determine planner class name from source.")
         return f"{match.group('name')}.java"
-
-    @staticmethod
-    def _snippet_line_range(snippet: _DiffSnippet) -> Optional[Tuple[int, int]]:
-        start: Optional[int]
-        count: Optional[int]
-        if snippet.new_start is not None and snippet.new_count is not None and snippet.new_count > 0:
-            start = snippet.new_start
-            count = snippet.new_count
-        elif snippet.old_start is not None and snippet.old_count is not None and snippet.old_count > 0:
-            start = snippet.old_start
-            count = snippet.old_count
-        else:
-            return None
-        end = start + max(count - 1, 0)
-        return start, end
-
-    @staticmethod
-    def _range_overlaps(snippet_range: Tuple[int, int], windows: Sequence[Tuple[int, int]]) -> bool:
-        start, end = snippet_range
-        for window_start, window_end in windows:
-            if end < window_start or start > window_end:
-                continue
-            return True
-        return False
-
-    def _build_error_windows(
-        self,
-        errors: Sequence[CompilationError],
-        plan_filename: str,
-        plan_source: Optional[str] = None,
-    ) -> List[Tuple[int, int]]:
-        windows: List[Tuple[int, int]] = []
-        plan_lines: Optional[List[str]] = None
-        if plan_source:
-            normalized = self._normalize_patch_text(plan_source)
-            plan_lines = normalized.splitlines()
-        for error in errors:
-            if error.file and Path(error.file).name != plan_filename:
-                continue
-            if error.line is None:
-                continue
-            line_number = int(error.line)
-            start = max(1, line_number - _ERROR_LINE_WINDOW)
-            end = line_number + _ERROR_LINE_WINDOW
-            windows.append((start, end))
-            if plan_lines:
-                method_window = self._method_window_for_line(plan_lines, line_number)
-                if method_window:
-                    windows.append(method_window)
-        merged = self._merge_windows(windows)
-        if merged:
-            return merged
-        if plan_lines:
-            total_lines = len(plan_lines)
-            if total_lines:
-                return [(1, total_lines)]
-        return []
-
-    @staticmethod
-    def _merge_windows(windows: Sequence[Tuple[int, int]]) -> List[Tuple[int, int]]:
-        if not windows:
-            return []
-        ordered = sorted((max(1, start), max(start, end)) for start, end in windows)
-        merged: List[Tuple[int, int]] = [ordered[0]]
-        for start, end in ordered[1:]:
-            last_start, last_end = merged[-1]
-            if start <= last_end + 1:
-                merged[-1] = (last_start, max(last_end, end))
-            else:
-                merged.append((start, end))
-        return merged
-
-    def _method_window_for_line(
-        self,
-        plan_lines: Sequence[str],
-        line_number: int,
-    ) -> Optional[Tuple[int, int]]:
-        if line_number < 1 or line_number > len(plan_lines):
-            return None
-        signature_idx = self._locate_method_signature(plan_lines, line_number - 1)
-        if signature_idx is None:
-            return None
-        block_start = self._locate_block_start(plan_lines, signature_idx)
-        if block_start is None:
-            return None
-        block_end = self._locate_block_end(plan_lines, block_start)
-        if block_end is None:
-            return None
-        return signature_idx + 1, block_end + 1
-
-    @staticmethod
-    def _locate_method_signature(plan_lines: Sequence[str], start_index: int) -> Optional[int]:
-        idx = min(start_index, len(plan_lines) - 1)
-        while idx >= 0:
-            line = plan_lines[idx].strip()
-            if not line or line.startswith("//"):
-                idx -= 1
-                continue
-            if line.startswith("@"):
-                idx -= 1
-                continue
-            if _METHOD_DECL_PATTERN.match(line) or _CLASS_DECL_PATTERN.match(line):
-                return idx
-            idx -= 1
-        return None
-
-    @staticmethod
-    def _locate_block_start(plan_lines: Sequence[str], signature_index: int) -> Optional[int]:
-        for idx in range(signature_index, len(plan_lines)):
-            if "{" in plan_lines[idx]:
-                return idx
-        return None
-
-    @staticmethod
-    def _locate_block_end(plan_lines: Sequence[str], block_start: int) -> Optional[int]:
-        depth = 0
-        for idx in range(block_start, len(plan_lines)):
-            line = plan_lines[idx]
-            depth += line.count("{")
-            depth -= line.count("}")
-            if depth <= 0:
-                return idx
-        return len(plan_lines) - 1 if plan_lines else None
 
     def _record_patch_skip(self, iteration_dir: Path, reason: str) -> None:
         clean_reason = reason.strip()
@@ -908,10 +800,9 @@ class JavaPlanFixer:
         plan_source: str,
         *,
         allowed_filenames: Optional[Set[str]] = None,
-        line_windows: Optional[List[Tuple[int, int]]] = None,
         skip_callback: Optional[Callable[[str], None]] = None,
     ) -> Tuple[List[_ContextPatch], Optional[str]]:
-        text = (raw_text or "").strip()
+        text = self._strip_code_fence_wrapper((raw_text or "").strip())
         if not text:
             raise ValueError("LLM response did not contain patch text.")
         body, notes = self._split_notes(text)
@@ -929,14 +820,6 @@ class JavaPlanFixer:
                         if skip_callback:
                             skip_callback(
                                 f"Skipped diff hunk for '{snippet.file_path}' (not in allowed files: {sorted(allowed_filenames)})."
-                            )
-                        continue
-                if line_windows:
-                    snippet_range = self._snippet_line_range(snippet)
-                    if snippet_range and not self._range_overlaps(snippet_range, line_windows):
-                        if skip_callback:
-                            skip_callback(
-                                f"Skipped diff hunk for '{snippet.file_path}' lines {snippet_range[0]}-{snippet_range[1]} (outside diagnostics)."
                             )
                         continue
                 try:
@@ -985,6 +868,9 @@ class JavaPlanFixer:
         current: List[str] = []
         collecting = False
         for line in lines:
+            stripped = line.strip()
+            if stripped.startswith("```"):
+                continue
             if line.startswith("--- "):
                 if current:
                     sections.append("\n".join(current).strip())
@@ -1010,11 +896,16 @@ class JavaPlanFixer:
             return stripped
         closing_index = None
         for idx in range(len(lines) - 1, 0, -1):
-            if lines[idx].strip() == "```":
+            if lines[idx].strip().startswith("```"):
                 closing_index = idx
                 break
-        body_lines = lines[1:closing_index] if closing_index is not None else lines[1:]
-        return "\n".join(body_lines).strip()
+        body_end = closing_index if closing_index is not None else len(lines)
+        body_lines = lines[1:body_end]
+        trailing_lines: List[str] = []
+        if closing_index is not None and closing_index + 1 < len(lines):
+            trailing_lines = lines[closing_index + 1 :]
+        combined = body_lines + trailing_lines
+        return "\n".join(combined).strip()
 
     @staticmethod
     def _is_diagnostic_annotation(line: str) -> bool:

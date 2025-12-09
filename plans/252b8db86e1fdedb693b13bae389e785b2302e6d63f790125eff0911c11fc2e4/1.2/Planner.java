@@ -1,64 +1,58 @@
 public class Planner {
-import java.util.List;
-import java.util.Map;
-
-public class Planner {
     public static void main(String[] args) {
-        processIssues();
+        readOpenIssuesFromQlty();
     }
 
-    private static void processIssues() {
-        List<Map<String, Object>> issues = fetchOpenIssuesFromQlty();
+    private static void readOpenIssuesFromQlty() {
+        Map<String, Object> issues = PlanningToolStubs.search_text_in_repository("qlty/issues", "open", false, null, null, List.of(".json"));
         if (issues.isEmpty()) {
             System.out.println("No open issues found.");
             return;
         }
-        Map<String, Object> issue = issues.get(0);
-        String repoPath = checkoutCodeFromGitHub(issue);
-        String branchName = createBranch(repoPath, issue);
-        diagnoseAndFixIssue(repoPath, branchName, issue);
-        pushChangesToGitHub(branchName);
-        createPullRequestOnGitHub(branchName, issue);
+        String firstIssuePath = (String) issues.values().iterator().next();
+        handleIssue(firstIssuePath);
     }
 
-    private static List<Map<String, Object>> fetchOpenIssuesFromQlty() {
-        // Stub: Fetch open issues from the Qlty API.
-        return PlanningToolStubs.search_text_in_repository("qlty/issues", "open", false, null, false, List.of(".json"));
+    private static void handleIssue(String issuePath) {
+        Map<String, Object> issueDetails = PlanningToolStubs.read_file(issuePath, null);
+        String repoUrl = (String) issueDetails.get("repo_url");
+        String branchPrefix = "fix/";
+        String branchName = branchPrefix + System.currentTimeMillis();
+        checkOutCodeFromGitHub(repoUrl, branchName);
     }
 
-    private static String checkoutCodeFromGitHub(Map<String, Object> issue) {
-        // Stub: Check out the relevant code from GitHub.
-        String repoUrl = (String) issue.get("repo_url");
-        return PlanningToolStubs.clone_repository(repoUrl);
+    private static void checkOutCodeFromGitHub(String repoUrl, String branchName) {
+        PlanningToolStubs.write_file_advanced("github_repo/.git/config", "[remote \"origin\"]\n  url=\"" + repoUrl + "\"\n  fetch=+refs/heads/*:refs/remotes/origin/*", null, null, true);
+        PlanningToolStubs.run_command("git clone " + repoUrl + " github_repo");
+        PlanningToolStubs.run_command("cd github_repo && git checkout -b \"" + branchName + "\"");
     }
 
-    private static String createBranch(String repoPath, Map<String, Object> issue) {
-        // Stub: Create a unique branch to address the issue.
-        String issueId = (String) issue.get("id");
+    private static void diagnoseIssue(String filePath) {
+        // Stubbed method to inspect the relevant code and identify the root cause
     }
 
-    private static void diagnoseAndFixIssue(String repoPath, String branchName, Map<String, Object> issue) {
-        // Stub: Diagnose the root cause of the issue and propose code changes.
-        String filePath = (String) issue.get("file_path");
-        String content = PlanningToolStubs.read_file(filePath).get("content").toString();
-        String fixedContent = refineCode(content);
-        PlanningToolStubs.write_file(filePath, fixedContent, "w");
+    private static void proposeAndApplyCodeChanges(String filePath, String changes) {
+        PlanningToolStubs.write_file(filePath, changes, null);
     }
 
-    private static String refineCode(String code) {
-        // Stub: Refine the code to ensure it compiles and passes tests.
-        return code.replace("// TODO", "// Fixed");
+    private static void runRelevantTests(String testFilePaths) {
+        PlanningToolStubs.run_command("mvn test -Dtest=" + testFilePaths);
     }
 
-    private static void pushChangesToGitHub(String branchName) {
-        // Stub: Push the branch to GitHub.
-        PlanningToolStubs.push_branch(branchName);
+    private static void refineCode() {
+        // Stubbed method to refine the code until it compiles and passes tests
     }
 
-    private static void createPullRequestOnGitHub(String branchName, Map<String, Object> issue) {
-        // Stub: Create a pull request on GitHub with a concise description of the changes made.
-        String prTitle = "Fix issue " + issue.get("id");
-        String prBody = "This PR fixes the root cause of issue " + issue.get("id") + ".";
-        PlanningToolStubs.create_pull_request(branchName, prTitle, prBody);
+    private static void stageAndCommitChanges(String commitMessage) {
+        PlanningToolStubs.run_command("git add .");
+        PlanningToolStubs.run_command("git commit -m "" + commitMessage + """);
+    }
+
+    private static void pushBranchToGitHub(String branchName) {
+        PlanningToolStubs.run_command("git push origin " + branchName);
+    }
+
+    private static void createPullRequest() {
+        // Stubbed method to create a pull request on GitHub with a concise description of the changes made
     }
 }

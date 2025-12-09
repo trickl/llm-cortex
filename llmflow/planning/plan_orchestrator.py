@@ -5,7 +5,6 @@ import json
 import logging
 import re
 import shutil
-import textwrap
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -135,10 +134,12 @@ class PlanOrchestrator:
                 repair_hints,
                 helper_focus=pending_helper_focus,
             )
+            helper_focus_active = bool((effective_request.metadata or {}).get("helper_focus"))
             pending_helper_focus = None
             tool_stub_class_name = effective_request.tool_stub_class_name
             artifact_prompt_hash: Optional[str] = None
             cached_plan: Optional[CachedPlan] = None
+            stub_hash: Optional[str] = None
             if self._cache_enabled:
                 artifact_prompt_hash = self._planner.compute_prompt_hash(effective_request)
                 effective_request.metadata.setdefault("plan_id", artifact_prompt_hash)
@@ -148,6 +149,12 @@ class PlanOrchestrator:
                     stub_hash=stub_hash,
                     stub_class_name=tool_stub_class_name,
                 )
+                if helper_focus_active and cached_plan is None:
+                    self._plan_logger.info(
+                        "java_plan helper_cache_miss=1 plan_id=%s helper=%s",
+                        artifact_prompt_hash,
+                        (effective_request.metadata or {}).get("helper_focus", {}).get("function"),
+                    )
 
             if cached_plan is not None:
                 plan_result = cached_plan.plan
@@ -281,19 +288,18 @@ class PlanOrchestrator:
             return original
 
         merged_constraints = list(original.additional_constraints or [])
-        merged_constraints.extend(repair_hints)
-
         task_text = original.task
         context_text = original.context
+
+        if repair_hints:
+            merged_constraints.extend(repair_hints)
+
         if helper_focus:
-            task_text, derived_context = self._build_helper_task(original, helper_focus)
-            if derived_context:
-                context_text = derived_context
-            helper_name = helper_focus.get("function")
-            if helper_name:
-                merged_constraints.append(
-                    f"Limit code changes to the helper method '{helper_name}' unless additional helpers are strictly required to support its logic."
-                )
+            helper_task, helper_context = self._build_helper_task(original, helper_focus)
+            if helper_task:
+                task_text = helper_task
+            if helper_context is not None:
+                context_text = helper_context
 
         metadata = dict(original.metadata or {})
         metadata["attempt_index"] = attempt_idx + 1
@@ -590,39 +596,17 @@ class PlanOrchestrator:
         comment = helper_focus.get("comment")
         analyzer_message = helper_focus.get("message")
         description_lines: List[str] = [
-            f"Implement the existing helper method '{helper_name}' inside the Planner class.",
-            "Focus exclusively on this helper's responsibilities; keep main() and other helpers unchanged unless a tiny supporting helper is absolutely required.",
-            "Honor the current method signature and return type, and use PlanningToolStubs.<name>(...) helpers for every external action (issue lookup, repo access, etc.).",
+            f"Implement the helper method '{helper_name}' inside Planner by replacing the placeholder body with real tool usage.",
+            "Use PlanningToolStubs.<name>(...) for every external action and break the work into concrete tool-driven steps.",
         ]
         if comment:
-            description_lines.append(f"Design note from the stub: {comment.strip()}")
+            description_lines.append(comment.strip())
         if analyzer_message:
             normalized_message = analyzer_message.strip()
             if not comment or normalized_message != comment.strip():
                 description_lines.append(normalized_message)
-        description_lines.extend(
-            [
-                "Break the helper's work into clear tool-driven steps.",
-                "Add comments only when describing TODOs or placeholders for unavailable integrations.",
-            ]
-        )
         helper_task = "\n\n".join(line for line in description_lines if line).strip()
-
-        broader_context = textwrap.dedent(base_request.task or "").strip()
-        derived_context_parts: List[str] = []
-        if broader_context:
-            derived_context_parts.append("Broader workflow context:")
-            derived_context_parts.append(broader_context)
-        if base_request.context:
-            derived_context_parts.append("")
-            derived_context_parts.append("Existing context:")
-            derived_context_parts.append(textwrap.dedent(base_request.context).strip())
-        if comment:
-            derived_context_parts.append("")
-            derived_context_parts.append("Helper stub note:")
-            derived_context_parts.append(comment.strip())
-        derived_context = "\n".join(part for part in derived_context_parts if part).strip()
-        return helper_task, (derived_context or base_request.context)
+        return helper_task, base_request.context
 
     def _persist_plan_inputs(
         self,

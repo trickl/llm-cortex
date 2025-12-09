@@ -79,6 +79,18 @@ class PlainOnlyLLMClient:
         return {"content": self.fallback_plan}
 
 
+def _build_request(**overrides: Any) -> JavaPlanRequest:
+    base_kwargs: Dict[str, Any] = {
+        "task": "Retrieve issues and fix them",
+        "context": "Repo: example, Branch: main",
+        "tool_names": ["log"],
+        "tool_stub_class_name": "PlanningToolStubs",
+        "tool_stub_source": "public final class PlanningToolStubs { public static void log(String value) {} }",
+    }
+    base_kwargs.update(overrides)
+    return JavaPlanRequest(**base_kwargs)
+
+
 def _format_log_call(call):
     template = call.args[0]
     params = call.args[1:]
@@ -259,8 +271,35 @@ def test_plain_prompt_mentions_helper_focus():
     assert client.messages and len(client.messages) >= 3
     plain_prompt = client.messages[-1]["content"]
     assert "hasOpenIssues" in plain_prompt
-    assert "Keep main()" in plain_prompt
-    assert "Stub: determine if repository has open issues" in plain_prompt
+    assert "Implement 'hasOpenIssues'" in plain_prompt
+    assert "getFirstIssue" not in plain_prompt
+    assert "Do not wrap the output" not in plain_prompt
+    assert "Keep main()" not in plain_prompt
+    assert helper_focus["comment"] in plain_prompt
+    assert "Helper note" not in plain_prompt
+
+
+def test_prompt_hash_stable_for_identical_requests():
+    client = DummyLLMClient({"java": JAVA_PLAN})
+    planner = JavaPlanner(client, specification="SPEC CONTENT")
+    request = _build_request()
+
+    first = planner.compute_prompt_hash(request)
+    second = planner.compute_prompt_hash(request)
+
+    assert first == second
+
+
+def test_prompt_hash_ignores_metadata_only_changes():
+    client = DummyLLMClient({"java": JAVA_PLAN})
+    planner = JavaPlanner(client, specification="SPEC CONTENT")
+    request = _build_request()
+    mutated = _build_request(metadata={"plan_id": "abc", "extra": "value"})
+
+    reference = planner.compute_prompt_hash(request)
+    mutated_hash = planner.compute_prompt_hash(mutated)
+
+    assert reference == mutated_hash
 
 
 def test_planner_logs_llm_request_payload(monkeypatch):

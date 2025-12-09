@@ -30,27 +30,6 @@ public class Planner {
 """.strip()
 
 
-LONG_METHOD_PLAN = """
-public class Planner {
-    public static void main(String[] args) throws Exception {
-        String repo = "demo";
-        String issue = "1";
-        String branch = repo + issue;
-        System.out.println(repo);
-        System.out.println(issue);
-        System.out.println(branch);
-        System.out.println(branch.toLowerCase());
-        System.out.println(branch.repeat(1));
-        System.out.println("done");
-    }
-
-    private static boolean hasOpenIssues() {
-        return false;
-    }
-}
-""".strip()
-
-
 def _make_error(line: int | None, *, column: int | None = 1, message: str | None = None) -> CompilationError:
     description = message or (f"error on line {line}" if line is not None else "error without line")
     return CompilationError(
@@ -133,34 +112,6 @@ def _fenced_patch_text() -> str:
         _patch_text(),
         "```",
     ])
-
-
-def _method_span_patch_text() -> str:
-    return "\n".join(
-        [
-            "--- a/Planner.java",
-            "+++ b/Planner.java",
-            "@@ -2,11 +2,12 @@",
-            " public class Planner {",
-            "     public static void main(String[] args) throws Exception {",
-            '         String repo = "demo";',
-            '         String issue = "1";',
-            '         String branch = repo + issue;',
-            '         System.out.println(repo);',
-            '         System.out.println(issue);',
-            '         System.out.println(branch);',
-            '+        System.out.println(branch.toUpperCase());',
-            '         System.out.println(branch.toLowerCase());',
-            '         System.out.println(branch.repeat(1));',
-            '         System.out.println("done");',
-            "     }",
-            "",
-            "     private static boolean hasOpenIssues() {",
-            "         return false;",
-            "     }",
-            " }",
-        ]
-    )
 
 
 class PlainLLMClient:
@@ -367,6 +318,63 @@ def test_plan_fixer_respects_custom_payload_retry_limit(tmp_path, compilation_er
     assert client.calls == 2
 
 
+def test_plan_fixer_resets_plan_source_on_duplicate_class_errors(tmp_path, compilation_errors):
+    duplicate_error = CompilationError(
+        message="duplicate class: Planner",
+        file="Planner.java",
+        line=1,
+        column=1,
+    )
+    first_fail = JavaCompilationResult(
+        success=False,
+        command=("javac",),
+        stderr="Planner.java:3: error",
+        errors=list(compilation_errors),
+    )
+    duplicate_fail = JavaCompilationResult(
+        success=False,
+        command=("javac",),
+        stderr="duplicate class",
+        errors=[duplicate_error],
+    )
+    repeat_fail = JavaCompilationResult(
+        success=False,
+        command=("javac",),
+        stderr="Planner.java:3: error",
+        errors=list(compilation_errors),
+    )
+    success_result = JavaCompilationResult(
+        success=True,
+        command=("javac",),
+        stdout="ok",
+        stderr="",
+        errors=[],
+    )
+    compiler = DummyPlanCompiler([first_fail, duplicate_fail, repeat_fail, success_result])
+    client = PlainLLMClient(_patch_text())
+    fixer = JavaPlanFixer(
+        client,
+        plan_compiler=compiler,
+        artifact_root=tmp_path / "artifacts",
+    )
+    request = PlanFixerRequest(
+        plan_id="plan-duplicate",
+        plan_source=BROKEN_PLAN,
+        prompt_hash="dup123",
+        task="Summarize README.md.",
+        compile_errors=compilation_errors,
+    )
+
+    result = fixer.fix_plan(request, attempt=1)
+
+    assert result.plan_source == FIXED_PLAN
+    assert result.compile_result.success is True
+    assert result.notes is not None and "duplicate class" in result.notes.lower()
+    assert client.calls == 2
+    assert compiler.calls[1]["plan_source"] == FIXED_PLAN
+    assert compiler.calls[2]["plan_source"] == BROKEN_PLAN
+
+
 def test_plan_fixer_limits_compiler_errors_in_prompt():
     errors = [
         _make_error(40),
@@ -460,21 +468,6 @@ def test_parse_patch_skips_unexpected_files():
     assert skips
     assert any("not in allowed files" in reason for reason in skips)
 
-
-def test_parse_patch_respects_diagnostic_windows():
-    fixer = JavaPlanFixer(PlainLLMClient(_patch_text()))
-    skips: List[str] = []
-    with pytest.raises(ValueError):
-        fixer._parse_patch_text(
-            _patch_text(),
-            BROKEN_PLAN,
-            allowed_filenames={"Planner.java"},
-            line_windows=[(50, 60)],
-            skip_callback=skips.append,
-        )
-    assert any("outside diagnostics" in reason for reason in skips)
-
-
 def test_parse_patch_accepts_code_fence_wrappers():
     fixer = JavaPlanFixer(PlainLLMClient(_fenced_patch_text()))
     patches, _ = fixer._parse_patch_text(
@@ -485,18 +478,24 @@ def test_parse_patch_accepts_code_fence_wrappers():
     assert patches
 
 
-def test_parse_patch_expands_diagnostics_to_method_scope():
-    fixer = JavaPlanFixer(PlainLLMClient(_method_span_patch_text()))
-    errors = [_make_error(4)]
-    windows = fixer._build_error_windows(errors, "Planner.java", LONG_METHOD_PLAN)
-    patches, _ = fixer._parse_patch_text(
-        _method_span_patch_text(),
-        LONG_METHOD_PLAN,
+def test_parse_patch_extracts_notes_from_fenced_payload():
+    fixer = JavaPlanFixer(PlainLLMClient(_fenced_patch_text()))
+    response = "\n".join(
+        [
+            "```diff",
+            _patch_text(),
+            "<<<NOTES>>>",
+            "Reverted duplicated block",
+            "```",
+        ]
+    )
+    patches, notes = fixer._parse_patch_text(
+        response,
+        BROKEN_PLAN,
         allowed_filenames={"Planner.java"},
-        line_windows=windows,
     )
     assert patches
-    assert any("branch.toUpperCase" in patch.replacement_code for patch in patches)
+    assert notes == "Reverted duplicated block"
 
 
 def test_apply_contextual_patches_reports_context_on_failure():

@@ -1,0 +1,26 @@
+--- a/Planner.java
++++ b/Planner.java
+@@ -16,7 +16,7 @@ public class Planner {
+     }
+ 
+     /**
+-     * Stub: Check if there are any open issues in the Qlty platform.
++     * Check if there are any open issues in the Qlty platform.
+      *
+      * @return true if there are open issues, false otherwise.
+      */
+@@ -24,6 +24,13 @@ public class Planner {
+         // TODO: Implement logic to check for open issues in the Qlty platform
+         return false; // Placeholder return value
+     }
++
++    /**
++     * Check if there are any open issues in the Qlty platform.
++     *
++     * @return true if there are open issues, false otherwise.
++     */
++    public static boolean hasOpenIssues() throws Exception {
++        // TODO: Implement logic to check for open issues in the Qlty platform
++        return PlanningToolStubs.search_text_in_repository("qlty/issues", "open", null, null, null, List.of(".txt")).containsKey("results");
++    }
+ }

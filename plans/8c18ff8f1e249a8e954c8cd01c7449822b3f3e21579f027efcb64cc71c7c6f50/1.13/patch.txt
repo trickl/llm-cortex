@@ -1,0 +1,19 @@
+===== PATCH 1 =====
+--- a/Planner.java
++++ b/Planner.java
+@@ -1,5 +1,5 @@
+ public class Planner {
+-    public static boolean hasOpenIssues() {
++    private static boolean hasOpenIssues() {
+         if (hasOpenIssues()) {
+             // Handle the issue
+         }
+@@ -6,7 +6,7 @@
+     private static boolean hasOpenIssues() {
+         Map<String, Object> searchResult = PlanningToolStubs.search_text_in_repository("/path/to/qlty/api", "open issue", false, null, null, List.of("json"));
+         // Convert the search result to a boolean indicating if open issues exist
+-        boolean hasOpenIssues = (boolean) searchResult.get("found");
++        boolean hasOpenIssues = (boolean) searchResult.getOrDefault("found", false);
+         return hasOpenIssues;
+     }
+ }

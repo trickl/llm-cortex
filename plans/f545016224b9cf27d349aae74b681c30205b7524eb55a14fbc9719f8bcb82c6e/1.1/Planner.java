@@ -1,0 +1,14 @@
+public class Planner {
+    public static void main(String[] args) {
+        if (hasOpenIssues()) {
+            // Handle the issue
+        } else {
+            System.out.println("No open issues to fix.");
+        }
+    }
+
+    private static boolean hasOpenIssues() {
+        // Stub: Check if there are any open issues in the Qlty platform.
+        return PlanningToolStubs.search_text_in_repository("/qlty/issues", "open", true, null, false, List.of(".json")).get("found") != null;
+    }
+}

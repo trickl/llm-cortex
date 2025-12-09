@@ -1,0 +1,11 @@
+{
+  "plan_id": "stub-2",
+  "prompt_hash": "hash-0568f2e35204",
+  "plan_metadata": {},
+  "prompt_messages": [],
+  "raw_response": {},
+  "artifact_attempt": 2,
+  "tool_stub_class_name": null,
+  "tool_stub_hash": null,
+  "stored_at": "2025-12-09T21:29:21.742851+00:00"
+}

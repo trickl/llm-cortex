@@ -1,0 +1,26 @@
+public class Planner {
+    import java.util.List;
+import java.util.Map;public class Planner {
+    public static void main(String[] args) {
+        if (hasOpenIssues()) {
+            // Handle the issue
+        } else {
+            System.out.println("No open issues to fix.");
+        }
+    }
+        List<String> extensions = List.of(".json");
+    }
+    private static boolean hasOpenIssues() {
+        List<String> extensions = List.of(".json");
+        return PlanningToolStubs.search_text_in_repository("/qlty/issues", "open", true, null, false, extensions).get("found") != null;
+    }
+}
+
+    /**
+     * Stub: Check if there are any open issues in the Qlty platform.
+     */
+    private static boolean hasOpenIssues() {
+        List<String> extensions = List.of(".json");
+        return PlanningToolStubs.search_text_in_repository("/qlty/issues", "open", true, null, false, extensions).get("found") != null;
+    }
+}

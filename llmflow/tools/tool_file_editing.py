@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from llmflow.tools.tool_decorator import register_tool
+from llmflow.tools.unified_diff_patch import apply_unified_diff_patch as _apply_unified_diff_patch
 
 _TOOL_TAGS = ["file_system", "file_editing", "file_management"]
 
@@ -97,5 +98,27 @@ def apply_text_rewrite(
             "path": str(path),
             "replacements": replacements if occurrence is None else min(replacements, 1),
         }
+    except Exception as exc:
+        return {"success": False, "error": str(exc)}
+
+
+@register_tool(tags=_TOOL_TAGS)
+def apply_unified_diff_patch(
+    diff_text: str,
+    repo_root: Optional[str] = None,
+    encoding: str = "utf-8",
+) -> Dict[str, Any]:
+    """Apply a unified diff (Strict Unified Diff spec) to files on disk.
+
+    Args:
+        diff_text: Unified diff content containing one or more file sections.
+        repo_root: Optional root directory that file paths are resolved against.
+        encoding: Text encoding used when reading and writing files.
+    """
+
+    try:
+        root = Path(repo_root).expanduser().resolve() if repo_root else Path.cwd()
+        summary = _apply_unified_diff_patch(diff_text, root, encoding=encoding)
+        return {"success": True, "root": str(root), **summary}
     except Exception as exc:
         return {"success": False, "error": str(exc)}

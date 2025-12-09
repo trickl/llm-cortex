@@ -1,0 +1,32 @@
+--- a/Planner.java
++++ b/Planner.java
+@@ -19,6 +19,7 @@
+     public static void main(String[] args) {
+         if (hasOpenIssues()) {
+             // Handle the issue
++        } else {
++            System.out.println("No open issues found.");
+         }
+     }
+
+     /**
+      * Stub: Check if there are any open issues in the Qlty platform.
+      *
+      * @return true if there are open issues, false otherwise.
+      */
+@@ -27,6 +28,15 @@
+     public static boolean hasOpenIssues() {
+         Map<String, Object> result = PlanningToolStubs.search_text_in_repository("qlty/issues", "open", true, null, false, List.of(".txt"));
+         return !result.isEmpty();
++    }
++
++    /**
++     * Stub: Check if there are any open issues in the Qlty platform.
++     *
++     * @return true if there are open issues, false otherwise.
++     */
++    public static boolean hasOpenIssues() {
++        Map<String, Object> result = PlanningToolStubs.search_text_in_repository("qlty/issues", "open", true, null, false, List.of(".txt"));
++        return !result.isEmpty();
+     }
+ }

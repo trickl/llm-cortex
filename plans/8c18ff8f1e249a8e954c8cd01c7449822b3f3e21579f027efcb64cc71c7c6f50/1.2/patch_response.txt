@@ -1,0 +1,18 @@
+--- a/Planner.java
++++ b/Planner.java
+@@ -1,5 +1,7 @@
+ import java.util.List;
++import java.util.Map;
+ 
+ public class Planner {
+     public static void main(String[] args) {
+         if (hasOpenIssues()) {
+             // Handle the issue
+         } else {
+@@ -12,6 +14,8 @@
+     private static boolean hasOpenIssues() {
+         // Stub: Check if there are any open issues in the Qlty platform.
+         Map<String, Object> result = PlanningToolStubs.search_text_in_repository("/path/to/qlty/api", "open issue", false, null, null, List.of("json"));
++        return (boolean) result.get("found");
+     }
+ }

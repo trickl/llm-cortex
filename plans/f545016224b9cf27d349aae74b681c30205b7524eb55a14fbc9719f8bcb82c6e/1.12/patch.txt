@@ -1,0 +1,15 @@
+===== PATCH 1 =====
+--- a/Planner.java
++++ b/Planner.java
+@@ -1,2 +1,4 @@
+ import java.util.List;
++import java.util.Map;
+ 
+ public class Planner {
+@@ -7,6 +9,8 @@ public class Planner {
+     private static boolean hasOpenIssues() {
+         List<String> extensions = List.of(".json");
+         Map<String, Object> result = PlanningToolStubs.search_text_in_repository("/qlty/issues", "open", true, null, false, extensions);
++        return result != null && (Boolean) result.get("found") != null;
+     }
+ }

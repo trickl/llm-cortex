@@ -733,11 +733,11 @@ class JavaPlanner:
 
         if helper_name:
             header = (
-                "Your prior response was empty or malformed; re-emit the complete Planner.java source but only"
+                "Your prior response was empty or malformed; re-emit Planner.java with a concrete implementation for"
                 if is_retry
-                else "Re-emit the complete Planner.java source but only"
+                else "Re-emit Planner.java with a concrete implementation for"
             )
-            header = f"{header} adjust the helper '{helper_name}'."
+            header = f"{header} '{helper_name}'."
         else:
             header = (
                 "Your prior response was empty or malformed; output the Java class verbatim below."
@@ -755,23 +755,17 @@ class JavaPlanner:
         else:
             task_summary = "Fulfill the previously described task."
 
+        sections.append(f"Task reminder: {task_summary}")
+
         if helper_name:
             sections.append(
-                "Keep main() and other helpers identical to the cached plan; rewrite only this helper unless a tiny"
-                " supporting helper is absolutely required."
+                f"Implement '{helper_name}' with PlanningToolStubs helpers, breaking the helper into concrete tool-driven steps."
             )
-            sections.append(f"Task reminder: {task_summary}")
             if helper_comment:
-                sections.append(f"Stub note: {helper_comment.strip()}")
+                sections.append(helper_comment.strip())
             if helper_message and helper_message.strip() != helper_comment:
                 sections.append(helper_message.strip())
-        else:
-            sections.append(f"Task reminder: {task_summary}")
 
-        sections.append(
-            "Return only the Java source for a single class named Planner, without JSON, markdown, or commentary."
-            " Continue calling PlanningToolStubs.<toolName>(...) exactly as defined."
-        )
         return "\n".join(section for section in sections if section).strip()
 
     def _build_messages(self, request: JavaPlanRequest) -> List[Dict[str, Any]]:
@@ -796,7 +790,7 @@ class JavaPlanner:
     ) -> str:
         header = (
             "You are the experienced Java developer."
-            " Produce a single Java class that fully solves the user's task by decomposing the problem into simpler parts."
+            " Produce a single, complete Java class that fully solves the user's task by decomposing the problem into simpler parts."
             " It should consist of a single main method calls at most seven other functions."
             " The only helper classes available are those provided in the PlanningToolsStub code."
             " These functions can be called directly to perform specific subtasks. Do not invent new APIs."
@@ -884,9 +878,6 @@ class JavaPlanner:
             )
             lines.append("")
 
-        lines.append(
-            "Output requirements: respond with only the Java source."
-        )
         return "\n".join(lines).strip()
 
     def _build_constraints(
@@ -900,7 +891,6 @@ class JavaPlanner:
             f"Call tools exclusively via the `{stub_name}.<name>(...)` static helpers; never invent new APIs.",
             "Limit every helper body to seven statements and ensure each helper is more specific than its caller.",
             "Stick to the allowed statement types (variable declarations, assignments, helper/tool calls, if/else, enhanced for, try/catch, returns).",
-            "Do not wrap the output in markdown; Java comments and imports are allowed but avoid prose explanations.",
         ]
         if not has_tools:
             constraints.append(

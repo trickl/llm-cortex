@@ -1,3 +1,5 @@
+import hashlib
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List
@@ -11,6 +13,7 @@ from llmflow.planning import (
     PlanFixerResult,
     PlanOrchestrator,
 )
+from llmflow.planning.plan_cache import PlanCache, compute_stub_hash
 
 
 @dataclass
@@ -33,18 +36,26 @@ class DummyPlanner:
             raise RuntimeError("No more plans queued")
         self.requests.append(request)
         source = self._plans.pop(0)
+        prompt_hash = self.compute_prompt_hash(request)
         return StubPlanResult(
             plan_id=f"stub-{len(self.requests)}",
             plan_source=source,
             metadata={},
             raw_response={},
             prompt_messages=[],
-            prompt_hash=f"hash-{len(self.requests)}",
+            prompt_hash=prompt_hash,
         )
 
     def compute_prompt_hash(self, request: JavaPlanRequest) -> str:
-        del request  # unused preview for deterministic hash
-        return f"hash-{len(self.requests) + 1}"
+        payload = {
+            "task": request.task,
+            "context": request.context,
+            "constraints": list(request.additional_constraints or []),
+            "helper_focus": (request.metadata or {}).get("helper_focus"),
+        }
+        serialized = json.dumps(payload, sort_keys=True, default=str)
+        digest = hashlib.sha256(serialized.encode("utf-8")).hexdigest()[:12]
+        return f"hash-{digest}"
 
 
 class DummyRunner:
@@ -130,6 +141,35 @@ def _compile_failure(message: str) -> JavaCompilationResult:
         stderr=message,
         errors=[CompilationError(message=message, file="Plan.java", line=3, column=5)],
     )
+
+
+def _seed_cached_plan(
+    plan_root: Path,
+    *,
+    prompt_hash: str,
+    plan_source: str,
+    stub_source: str,
+    stub_class: str,
+) -> None:
+    attempt_dir = plan_root / prompt_hash / "1"
+    attempt_dir.mkdir(parents=True, exist_ok=True)
+    (attempt_dir / "Plan.java").write_text(plan_source.strip() + "\n", encoding="utf-8")
+    classes_dir = attempt_dir / "classes"
+    classes_dir.mkdir(parents=True, exist_ok=True)
+    (classes_dir / "Dummy.class").write_bytes(b"0")
+    (attempt_dir / "clean").touch()
+    metadata = {
+        "plan_id": prompt_hash,
+        "prompt_hash": prompt_hash,
+        "plan_metadata": {},
+        "prompt_messages": [],
+        "raw_response": {},
+        "artifact_attempt": 1,
+        "tool_stub_class_name": stub_class,
+        "tool_stub_hash": compute_stub_hash(stub_source),
+        "stored_at": "2025-01-01T00:00:00Z",
+    }
+    (attempt_dir / "plan_metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
 
 
 def test_compile_failures_trigger_new_attempt_without_inline_replan(runner_factory):
@@ -325,6 +365,170 @@ def test_compile_failure_returns_failure_without_inline_replan(runner_factory):
     attempt = result["attempts"][0]
     assert len(attempt["compile_attempts"]) == 1
     assert attempt["compile_attempts"][0]["success"] is False
+
+def test_helper_focus_retries_apply_helper_specific_prompt(runner_factory):
+    planner = DummyPlanner([
+        """
+        public class Plan {
+            public void main() { }
+        }
+        """,
+    ])
+    runner, make_runner = runner_factory([
+        {"success": True, "errors": [], "metadata": {}},
+    ])
+    compiler = DummyCompiler([_compile_success()])
+    orchestrator = PlanOrchestrator(
+        planner,
+        make_runner,
+        plan_compiler=compiler,
+        enable_plan_cache=False,
+    )
+    base_request = JavaPlanRequest(
+        task="Original task",
+        context="Some context",
+        additional_constraints=["Stay safe"],
+    )
+    helper_focus = {
+        "function": "hasOpenIssues",
+        "comment": "Stub note",
+        "message": "Helper is still a placeholder",
+    }
+    repair_hints = ["Implement helper method 'hasOpenIssues' so it performs the described behavior."]
+
+    augmented = orchestrator._augment_request(
+        base_request,
+        attempt_idx=1,
+        repair_hints=repair_hints,
+        helper_focus=helper_focus,
+    )
+
+    assert augmented.task != base_request.task
+    assert "hasOpenIssues" in augmented.task
+    assert augmented.context == base_request.context
+    assert "Focus exclusively" not in augmented.task
+    assert "Broader workflow context" not in (augmented.context or "")
+    assert "Stub note" in augmented.task
+    assert "Helper note" not in augmented.task
+    assert repair_hints[0] in augmented.additional_constraints
+    assert augmented.metadata["helper_focus"]["function"] == "hasOpenIssues"
+    assert augmented.metadata["repair_hints"] == repair_hints
+
+    no_helper = orchestrator._augment_request(
+        base_request,
+        attempt_idx=1,
+        repair_hints=repair_hints,
+        helper_focus=None,
+    )
+    assert repair_hints[0] in no_helper.additional_constraints
+    assert no_helper.task == base_request.task
+    assert no_helper.context == base_request.context
+
+
+def test_helper_focus_helper_cache_checked_and_persisted(runner_factory, tmp_path: Path, monkeypatch):
+    cached_plan = """
+    public class Planner {
+        public static void main(String[] args) throws Exception {
+            hasOpenIssues();
+        }
+
+        private static boolean hasOpenIssues() {
+            // TODO: implement
+            return false;
+        }
+    }
+    """.strip()
+    helper_plan = """
+    public class Planner {
+        public static void main(String[] args) throws Exception {
+            hasOpenIssues();
+        }
+
+        private static boolean hasOpenIssues() throws Exception {
+            PlanningToolStubs.log("checking");
+            return true;
+        }
+    }
+    """.strip()
+    planner = DummyPlanner([helper_plan])
+    runner, make_runner = runner_factory([
+        {
+            "success": False,
+            "errors": [
+                {
+                    "type": "stub_method",
+                    "function": "hasOpenIssues",
+                    "message": "Helper is still a placeholder",
+                    "comment": "Stub: Check if there are open issues.",
+                }
+            ],
+        },
+        {"success": True, "errors": [], "metadata": {}},
+    ])
+    compiler = DummyCompiler([_compile_success(), _compile_success()])
+    stub_source = "public final class PlanningToolStubs { public static void log(String msg) { } }"
+    request = JavaPlanRequest(
+        task="Close the first lint issue",
+        goals=["goal"],
+        tool_stub_source=stub_source,
+        tool_stub_class_name="PlanningToolStubs",
+    )
+    plan_root = tmp_path / "plans"
+    cached_hash = planner.compute_prompt_hash(request)
+    _seed_cached_plan(
+        plan_root,
+        prompt_hash=cached_hash,
+        plan_source=cached_plan,
+        stub_source=stub_source,
+        stub_class="PlanningToolStubs",
+    )
+    load_calls = []
+
+    original_load = PlanCache.load
+
+    def tracking_load(self, prompt_hash, *, stub_hash, stub_class_name):
+        result = original_load(self, prompt_hash, stub_hash=stub_hash, stub_class_name=stub_class_name)
+        load_calls.append(
+            {
+                "prompt_hash": prompt_hash,
+                "stub_hash": stub_hash,
+                "stub_class_name": stub_class_name,
+                "hit": result is not None,
+            }
+        )
+        return result
+
+    monkeypatch.setattr(PlanCache, "load", tracking_load)
+
+    orchestrator = PlanOrchestrator(
+        planner,
+        make_runner,
+        max_retries=1,
+        max_structure_attempts=5,
+        plan_compiler=compiler,
+        plan_artifact_root=plan_root,
+        enable_plan_cache=True,
+    )
+
+    result = orchestrator.execute_with_retries(request)
+
+    assert result["success"] is True
+    assert len(planner.requests) == 1, "Helper-focus retry should invoke the planner once"
+    assert runner.calls[0]["plan_source"].strip().startswith("public class Planner")
+    assert "PlanningToolStubs.log(\"checking\")" in runner.calls[1]["plan_source"]
+    assert len(load_calls) >= 2
+    assert load_calls[0]["hit"] is True, "Top-level attempt should hit cache"
+    helper_hash = result["final_plan"].prompt_hash
+    assert any(call["prompt_hash"] == helper_hash for call in load_calls)
+    helper_miss = [call for call in load_calls if call["prompt_hash"] == helper_hash][-1]
+    assert helper_miss["hit"] is False, "Helper attempt should check cache and miss before replanning"
+    helper_cache = PlanCache(plan_root)
+    helper_entry = helper_cache.load(
+        helper_hash,
+        stub_hash=compute_stub_hash(stub_source),
+        stub_class_name="PlanningToolStubs",
+    )
+    assert helper_entry is not None, "Successful helper plans should be cached"
 
 
 def test_compile_failure_aborts_when_limit_reached(runner_factory):

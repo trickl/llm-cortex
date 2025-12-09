@@ -1,11 +1,11 @@
 ===== PATCH 1 =====
 --- a/Planner.java
 +++ b/Planner.java
-@@ -1,0 +2,3 @@
-+import java.util.List;
-+import java.util.Map;
-+
- public class Planner {
-     public static void main(String[] args) {
-         processIssues();
+@@ -46,7 +46,7 @@ public class Planner {
+     private static void stageAndCommitChanges(String commitMessage) {
+         PlanningToolStubs.run_command("git add .");
+-        PlanningToolStubs.run_command("git commit -m "" + commitMessage + """);
++        PlanningToolStubs.run_command("git commit -m \"" + commitMessage + "\"");
      }
+ 
+     private static void pushBranchToGitHub(String branchName) {
